@@ -1,0 +1,712 @@
+/* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
+/*
+ * Copyright (c) 2019 National Instruments
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation;
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *
+ * Author: Vincent Kotzsch <vincent.kotzsch@ni.com>
+ *         Clemens Felber <clemens.felber@ni.com>
+ */
+
+
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <cassert>
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/mobility-module.h"
+#include "ns3/config-store-module.h"
+#include "ns3/wifi-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/tap-bridge-module.h"
+#include "ns3/netanim-module.h"
+#include "ns3/point-to-point-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/flow-monitor-module.h"
+#include "ns3/wifi-module.h"
+#include "ns3/lte-helper.h"
+#include "ns3/lte-module.h"
+#include "ns3/csma-module.h"
+#include "ns3/epc-helper.h"
+#include "ns3/network-module.h"
+#include "ns3/ipv4-global-routing-helper.h"
+#include "ns3/mobility-module.h"
+#include "ns3/virtual-net-device.h"
+#include "ns3/tap-bridge-module.h"
+#include "ns3/AMuSt-module.h"
+#include "ns3/socket.h"
+#include "ns3/tcp-socket.h"
+
+//#include "ipv4-lwa-ue-static-routing-helper.h"
+//#include "lwa-application-helper.h"
+//#include "lwa-application.h"
+//#include "tcp-tag.h"
+using namespace ns3;
+
+NS_LOG_COMPONENT_DEFINE ("NiLwaLwipExt");
+
+Ptr<Socket> lwaapTxSocket;
+std::map<string, Ptr<LtePdcp>> rlcMap;
+//Ptr<LwaApplication> lwaApp;
+
+// function for lwa/lwip packet handling transmitted through the LtePdcp::DoTransmitPdcpSdu
+void LtePdcpLwaHandler (Ptr< const Packet> p){
+
+  //uint32_t currentPacketSeqNum=0;
+  //SeqTsHeader seqTs;
+
+  // copy incoming packet
+  Ptr<Packet> currentPacket = p->Copy();
+
+  // remove headers to get sequence number and include lwa/lwip header
+  LtePdcpHeader pdcpHeader;
+  currentPacket->RemoveHeader (pdcpHeader);
+  Ipv4Header ipHeader;
+  currentPacket->RemoveHeader (ipHeader);
+  TcpHeader tcpHeader;
+  currentPacket->RemoveHeader (tcpHeader);
+  // remove sequence number and add UDP/IP/PDCP only for Client-Server application, NOT for tapbridge
+  // currentPacket->RemoveHeader (seqTs);
+  // currentPacketSeqNum=seqTs.GetSeq ();
+
+  // add headers again
+  currentPacket->AddHeader (tcpHeader);
+  currentPacket->AddHeader (ipHeader);
+  currentPacket->AddHeader (pdcpHeader);
+
+  // read lwa tags added by pdcp layer and add lwa information
+  // as separate header to data packets (won't be removed when transmitting
+  // packets via API)
+  LwaTag   lwaTag;
+  PdcpLcid lcidTag;
+  //TcpTag tcpTag;
+  uint32_t lcid=0;
+  uint32_t bid=0;
+  LwaLwipHeader lwaLwipHeader;
+
+  // tag to copy the logical channel id of the frame
+  if(p->FindFirstMatchingByteTag (lcidTag)){
+      lcid = lcidTag.Get();
+      bid = lcid - 2;
+  }
+  lwaLwipHeader.SetBearerId (bid);
+
+
+  // packet handling for lwa packets
+  if (currentPacket->PeekPacketTag(lwaTag)){
+      // copy additional headers only for Client-Server application, NOT for tapbridge
+	  //currentPacket->RemoveHeader (pdcpHeader);
+      //copy the status of LWA activation (LTE, Split, swtiched)
+      lwaLwipHeader.SetLwaActivate (lwaTag.Get());
+      // add lwa lwip header
+      currentPacket->AddHeader (lwaLwipHeader);
+      // add current sequence number
+      // seqTs.SetSeq (currentPacketSeqNum);
+      // currentPacket->AddHeader (seqTs);
+      ////tcpTag.Set(tcpHeader.GetAckNumber().GetValue());
+      ////currentPacket->AddByteTag(tcpTag);
+      // send packet over the lwaap socket
+      ////lwaapTxSocket = lwaApp->GetSocket();
+      //NS_LOG_DEBUG(lwaapTxSocket->GetTxAvailable());
+      // NS_LOG_DEBUG("eNB send PDCP data for lcid=" << (uint32_t) lcid << ", packet size=" << p->GetSize ());
+
+      lwaapTxSocket->Send(currentPacket);
+
+	//NS_LOG_DEBUG ("LWA: Sent packet with PDCP Sequence Number " << pdcpHeader.GetSequenceNumber());
+  }
+}
+
+// assign callback function to the pdcp object
+// NOTE: object is created after bearer release which is after attach procedure
+static void
+Callback_LtePDCPTX
+(void){
+  Config::ConnectWithoutContext ("/NodeList/*/DeviceList/*/$ns3::LteNetDevice/$ns3::LteEnbNetDevice/LteEnbRrc/UeMap/*/DataRadioBearerMap/*/LtePdcp/TxPDUtrace", MakeCallback (&LtePdcpLwaHandler));
+}
+
+
+void ReceivePacket (Ptr<Socket> socket)
+{
+  Ptr<Packet> packet = socket->Recv ();
+  //NS_LOG_DEBUG ("Packet received from LWAAP: " << packet->ToString() << " at " << socket->GetNode()->GetId());
+  LwaLwipHeader lwaLwipHeader;
+  packet->RemoveHeader(lwaLwipHeader);
+  //if (lwaLwipHeader != null){
+	  // NS_LOG_DEBUG ("Has LWA header with lcid: " << lwaLwipHeader.GetBearerId()+2);
+	  Ptr<LtePdcp> found = rlcMap.find(to_string(socket->GetNode()->GetId()))->second;
+	  NS_LOG_DEBUG ("Getting RLC Now.. "<< found->GetTypeId());
+	  found->GetLteRlcSapUser()->ReceivePdcpPdu(packet);
+  //}
+}
+
+void
+NotifyConnectionEstablishedUe (
+                       uint64_t imsi,
+                       uint16_t cellId,
+                       uint16_t rnti)
+{
+  std::cout << Simulator::Now ().GetSeconds ()
+            << " UE IMSI " << imsi
+            << ": connected to CellId " << cellId
+            << " with RNTI " << rnti
+            << std::endl;
+  Simulator::Schedule(MilliSeconds(100), &Callback_LtePDCPTX);
+}
+
+void NotifyDRBCreatedUe (std::string context, uint64_t imsi, uint16_t cellId, uint16_t rnti, uint8_t lcid, Ptr<LtePdcp> rlc){
+	std::cout << Simulator::Now ().GetSeconds ()
+			    << "Context: " << context
+	            << " UE IMSI " << imsi
+	            << ": connected to CellId " << cellId
+	            << " with RNTI " << rnti
+				<< " has DRB with lcid " << lcid
+				<< " and RLC " << rlc->GetTypeId()
+	            << std::endl;
+	// TODO: use drbMap from RRC or use lcid for mapping too
+	rlcMap.insert(std::pair<std::string, Ptr<LtePdcp>> (context, rlc));
+}
+
+void NotifySRBCreatedUe (uint64_t imsi, uint16_t cellId, uint16_t rnti, Ptr<LtePdcp> rlc){
+	std::cout << Simulator::Now ().GetSeconds ()
+	            << " UE IMSI " << imsi
+	            << ": connected to CellId " << cellId
+	            << " with RNTI " << rnti
+				<< " has SRB with lcid " << 0
+				<< " and RLC " << rlc->GetTypeId()
+	            << std::endl;
+}
+std::string GetCurrentWorkingDir( void ) {
+  char buff[250];
+  char* cwd = getcwd( buff, 250 );
+  std::cout << cwd;
+  std::string current_working_dir(buff);
+  return current_working_dir;
+}
+
+// main function
+int main (int argc, char *argv[]){
+
+  bool verbose = true;
+
+  // enable native ns-3 logging - note: can also be used if compiled in "debug" mode
+  if (verbose)
+    {
+	  PacketMetadata::Enable();
+      //LogComponentEnable ("LtePdcp", LOG_LEVEL_ALL);
+      LogComponentEnable ("NiLwaLwipExt", LOG_LEVEL_ALL);
+      //LogComponentEnable("TcpSocketBase", LOG_LEVEL_LOGIC);
+      //LogComponentEnable("Ipv4LwaUeStaticRouting", LOG_LEVEL_ALL);
+      //LogComponentEnable("LwaApplication", LOG_LEVEL_ALL);
+      //LogComponentEnable("Config", LOG_LEVEL_ALL);
+      //LogComponentEnable("HttpClientApplication", LOG_LEVEL_ALL);
+      //LogComponentEnable("ThreeGppHttpServer", LOG_LEVEL_ALL);
+      //LogComponentEnable("StaWifiMac", LOG_LEVEL_LOGIC);
+    }
+
+  // Simulation time in seconds
+  double simTime    = 40;
+  // Starting time in seconds for packet transmission for ns-3 generated packets
+  double transmTime = 5;
+
+  // Time between packet generation events at client app in milliseconds
+  double   packetInterval = 500;
+  // Number of ns-3 generated packets
+  uint32_t packetNum      = 5;
+  // Packet sizes for ns-3 generated packets
+  uint32_t packetSize     = 1000;
+
+  // define client server configuration
+  // 1 = server running on a LAN node in same network
+  // 2 = UE Terminal Node, server running on LTE UE NetDevice
+  // 3 = UE Terminal Node, server running on WIFI NetDevice
+  int cientServerConfig = 2;
+
+  // ========================
+  // general NI API parameter
+
+  // Set log file names
+  std::string LogFileName;
+
+  // MCS used by 802.11 AFW
+  uint32_t niApiWifiMcs(5);
+  //
+  double rss = -80; // -dBm
+  //
+  std::string phyRate = "VhtMcs8";        // PHY bitrate
+
+  // =======================
+  // UOC LWIP/LWA extensions
+
+  double lwaactivate=1;     // LTE+Wifi=1, Wi-Fi=2
+
+  // MTU size for P2P link between EnB and Wifi AP
+  double xwLwaLinkMtuSize=1500;
+  //delay of p2p link
+  std::string xwLwaLinkDelay="0ms";
+  //data rate of p2p link
+  std::string xwLwaLinkDataRate="100Mbps";
+
+  // ==========================================
+  // parse command line for function parameters
+
+  CommandLine cmd;
+
+  cmd.AddValue("packetSize", "size of application packet sent", packetSize);
+  cmd.AddValue("numPackets", "number of packets generated", packetNum);
+  cmd.AddValue("interval", "interval (milliseconds) between packets", packetInterval);
+  cmd.AddValue("simTime", "Duration in seconds which the simulation should run", simTime);
+  cmd.AddValue("transmTime", "Time in seconds when the packet transmission should be scheduled", transmTime);
+  cmd.AddValue("cientServerConfig", "Client Server Configuration (Server on 1=LAN Node, 2=UE Node LTE, 3=UE Node WIFI)", cientServerConfig);
+  cmd.AddValue("niApiWifiMcs", "MCS to be used by the 802.11 AFW", niApiWifiMcs);
+
+  cmd.Parse (argc, argv);
+
+  // Activate the ns-3 real time simulator
+  GlobalValue::Bind ("SimulatorImplementationType", StringValue ("ns3::RealtimeSimulatorImpl"));
+  Config::SetDefault ("ns3::RealtimeSimulatorImpl::SynchronizationMode", StringValue("BestEffort")); //BestEffort
+  // GlobalValue::Bind ("ChecksumEnabled", BooleanValue (true)); // needed for tapBridge
+
+  std::cout << "LWA:                   ";
+  if (lwaactivate==1)      std::cout << "partial (LTE+WiFi) activated" << std::endl;
+  else if (lwaactivate==2) std::cout << "activated" << std::endl;
+  else                     std::cout << "not activated" << std::endl;
+
+  std::cout << "Client Server Config:  " << cientServerConfig << std::endl;
+
+  std::cout << std::endl;
+
+  NS_LOG_INFO ("Init NI modules ...");
+  
+  // ==========================
+  // configure helper functions
+
+  // p2p helper
+  PointToPointHelper p2pHelp;
+                     p2pHelp.SetDeviceAttribute ("DataRate", StringValue ("100Mbps"));
+                     p2pHelp.SetChannelAttribute ("Delay", StringValue ("2ms"));
+                     p2pHelp.SetDeviceAttribute ("Mtu", UintegerValue (1500));
+
+  // csma helper
+  /*CsmaHelper csmaHelp;
+             csmaHelp.SetChannelAttribute ("DataRate", StringValue ("100Mbps"));
+             csmaHelp.SetChannelAttribute ("Delay", TimeValue (NanoSeconds (6560)));*/
+
+  // wifi helper
+  Ssid       ssid = Ssid ("wifi-default");
+
+  WifiHelper wifiHelp;
+             wifiHelp.SetStandard (WIFI_PHY_STANDARD_80211ac);
+             wifiHelp.SetRemoteStationManager ("ns3::ConstantRateWifiManager");
+  //if (verbose) wifiHelp.EnableLogComponents ();  // Turn on all Wifi logging
+
+  WifiMacHelper wifiApMacHelp, wifiStaMacHelp ;
+  wifiApMacHelp.SetType ("ns3::ApWifiMac", "Ssid", SsidValue (ssid));
+  wifiStaMacHelp.SetType ("ns3::StaWifiMac", "Ssid", SsidValue (ssid));
+
+  // disable fragmentation for frames below 2200 bytes
+  Config::SetDefault ("ns3::WifiRemoteStationManager::FragmentationThreshold", StringValue ("2200"));
+  // turn off RTS/CTS for frames below 2200 bytes
+  Config::SetDefault ("ns3::WifiRemoteStationManager::RtsCtsThreshold", StringValue ("2200"));
+
+  YansWifiChannelHelper wifiChannelHelp = YansWifiChannelHelper::Default ();
+                        wifiChannelHelp.SetPropagationDelay ("ns3::ConstantSpeedPropagationDelayModel");
+                        wifiChannelHelp.AddPropagationLoss ("ns3::FixedRssLossModel","Rss",DoubleValue (rss));
+  YansWifiPhyHelper     wifiPhyHelp =  YansWifiPhyHelper::Default ();
+                        wifiPhyHelp.Set ("RxGain", DoubleValue (0) );
+                        wifiPhyHelp.SetPcapDataLinkType (YansWifiPhyHelper::DLT_IEEE802_11_RADIO);
+                        wifiPhyHelp.SetChannel (wifiChannelHelp.Create ());
+
+  MobilityHelper MobilityHelp;
+                 MobilityHelp.SetMobilityModel ("ns3::ConstantPositionMobilityModel");
+
+  // ip helper
+  InternetStackHelper     ipStackHelp;//, ueIpStackHelp;
+  Ipv4AddressHelper       ipAddressHelp;
+  Ipv4Mask                IpMask = "255.255.255.0";
+  Ipv4StaticRoutingHelper ipv4RoutingHelper;
+  //Ipv4LwaUeStaticRoutingHelper ipv4LwaUeRoutingHelper;
+  //ueIpStackHelp.SetRoutingHelper(ipv4LwaUeRoutingHelper);
+  // ipv4LwaUeRoutingHelper.Add(ipv4RoutingHelper, 0);
+
+  // main router node to connect lan with wifi and lte mobile networks
+  Ptr<Node> MobileNetworkGwNode = CreateObject<Node> ();
+  Names::Add("RemoteHost", MobileNetworkGwNode);
+  // wifi station nodes
+  NodeContainer wifiStaNodes;
+                wifiStaNodes.Create (0);
+  // Names::Add("staNode", wifiStaNodes.Get(0));
+  // wifi access point nodes - here fixed to one but can be extended
+  NodeContainer wifiApNode;
+                wifiApNode.Create (1);
+  Names::Add("ApNode", wifiApNode.Get(0));
+  // lan nodes connected via ethernet - added mobile network gateway here
+  NodeContainer LanNodes;
+                LanNodes.Add (MobileNetworkGwNode);
+                //LanNodes.Create (2);
+
+  // lte user terminal nodes
+  NodeContainer ueNodes;
+                ueNodes.Create(1);
+  Names::Add("UENode", ueNodes.Get(0));
+  // lte enb nodes - here fixed to one but can be extended
+  NodeContainer enbNodes;
+                enbNodes.Create(1);
+  Names::Add("EnbNode", enbNodes.Get(0));
+  // install corresponding net devices on all nodes
+  // NetDeviceContainer p2pWifiDevices  = p2pHelp.Install (MobileNetworkGwNode, wifiApNode.Get(0));
+
+  //NetDeviceContainer csmaDevices     = csmaHelp.Install (LanNodes);
+  // note: all ue nodes have an lte and wifi net device
+  NetDeviceContainer staDevices      = wifiHelp.Install (wifiPhyHelp, wifiStaMacHelp, NodeContainer(ueNodes, wifiStaNodes));
+  NetDeviceContainer apDevices       = wifiHelp.Install (wifiPhyHelp, wifiApMacHelp, wifiApNode);
+
+  // install ip stacks on all nodes
+  ipStackHelp.Install (LanNodes);
+  ipStackHelp.Install (wifiStaNodes);
+  ipStackHelp.Install (wifiApNode);
+  ipStackHelp.Install (ueNodes);
+  //ueIpStackHelp.Install (ueNodes);
+
+  // configure ip address spaces and gateways for the different subnetworks
+  // Ipv4Address csmaIpSubnet    = "10.1.1.0";
+  Ipv4Address WifiIpSubnet    = "10.1.2.0";
+  // Ipv4Address p2pWifiIpSubnet = "10.1.3.0";
+  Ipv4Address p2pLteIpSubnet  = "10.1.4.0";
+  Ipv4Address UeIpSubnet      = "7.0.0.0";
+  Ipv4Address xwLwaSubnet     = "20.1.2.0";
+  //Ipv4Address xwLwipSubnet    = "20.1.3.0";
+
+  // create wifi p2p link to mobile network gateway
+  /*ipAddressHelp.SetBase (p2pWifiIpSubnet, IpMask);
+  Ipv4InterfaceContainer p2pWifiIpInterfaces = ipAddressHelp.Assign (p2pWifiDevices);
+  Ipv4Address LanGwIpAddr = p2pWifiIpInterfaces.GetAddress (0);
+*/
+  // create lan network with stations - sta0 is mobile network gateway
+  /*ipAddressHelp.SetBase (csmaIpSubnet, IpMask);
+  Ipv4InterfaceContainer LanIpInterfaces = ipAddressHelp.Assign (csmaDevices);
+  Ipv4Address LanGwIpAddr = LanIpInterfaces.GetAddress (0);//"10.1.1.1";
+  */
+
+  // create wifi network - ap0 is connected to mobile network gateway
+  ipAddressHelp.SetBase (WifiIpSubnet, IpMask);
+  Ipv4InterfaceContainer wifiIpInterfaces;
+                         wifiIpInterfaces.Add (ipAddressHelp.Assign (apDevices));
+                         wifiIpInterfaces.Add (ipAddressHelp.Assign (staDevices));
+  Ipv4Address WifiGwIpAddr = wifiIpInterfaces.GetAddress (0);//"10.1.2.1";
+
+  // ==========================
+  // LWA/LWIP extensions by UOC
+
+  // Switch to enable/disable LWA functionality (also partial use)
+  Config::SetDefault ("ns3::LtePdcp::PDCPDecLwa", UintegerValue(lwaactivate));
+
+  // create p2p helper for LWA/Xw link
+  PointToPointHelper p2pHelpXw;
+                     p2pHelpXw.SetDeviceAttribute ("DataRate", StringValue (xwLwaLinkDataRate));
+                     p2pHelpXw.SetChannelAttribute ("Delay", StringValue (xwLwaLinkDelay));
+                     p2pHelpXw.SetDeviceAttribute ("Mtu", UintegerValue (xwLwaLinkMtuSize));
+
+  // create lwaap node
+  Ptr<Node> lwaapNode = CreateObject<Node> ();
+  Names::Add("LWAAP", lwaapNode);
+  // install p2p net devices to create parallel lwa and lwip links
+  NetDeviceContainer xwLwaDevices  = p2pHelpXw.Install (lwaapNode, wifiApNode.Get(0));
+
+  // install ip stack on additional nodes
+  ipStackHelp.Install(lwaapNode);
+
+  // assign ip adresses to lwa / lwip links
+  Ipv4AddressHelper XwAddress;
+  XwAddress.SetBase (xwLwaSubnet, "255.255.255.0");
+  Ipv4InterfaceContainer xwLwaIpInterfaces = XwAddress.Assign (xwLwaDevices);
+
+  // create socket on lwaap socket to enable transmission of lwa packets
+
+  TypeId tid = TypeId::LookupByName ("ns3::UdpSocketFactory");
+  lwaapTxSocket = Socket::CreateSocket (lwaapNode, tid);
+  lwaapTxSocket->Bind ();
+  lwaapTxSocket->Connect (InetSocketAddress (Ipv4Address::ConvertFrom(wifiIpInterfaces.GetAddress (1)), 9));
+  lwaapTxSocket->SetRecvCallback (MakeNullCallback<void, Ptr<Socket> > ());
+  lwaapTxSocket->SetAllowBroadcast (true);
+
+  // schedule function call to connect locally defined Lte_pdcpDlTxPDU traceback function to LTE PDCP Tx
+  // Important: First function call call needs to be scheduled AFTER initial attach procedure is finished successfully.
+  //            Thats why a callbackStart delay is added here as a dirty hack
+  // TODO-NI: find a better solution to connect callback to PDCP (without timing constaint)
+  /*const uint32_t assumedLteAttachDelayMs = 1000;
+  if ((transmTime * 1000) < assumedLteAttachDelayMs) {
+      // limit start time for packet generation
+      transmTime = assumedLteAttachDelayMs / 1000;
+      NS_LOG_DEBUG ("StartTime for packet generation too small! Adapted to: " << transmTime << " second(s)");
+  }
+  // start call back 100ms before datageneration
+  uint32_t callbackStartMs = uint32_t (transmTime * 1000 - 100);
+  Simulator::Schedule (MilliSeconds(callbackStartMs),&Callback_LtePDCPTX);*/
+
+  // initialize routing database and set up the routing tables in the nodes
+  Ipv4GlobalRoutingHelper::PopulateRoutingTables ();
+
+  // ===================================================================================================================
+  // setup the lte network - note that lte is configured after "PopulateRoutingTables" as static routing is used for epc
+
+  // Set downlink transmission bandwidth in number of resource blocks -> set to 20MHz default here
+  Config::SetDefault ("ns3::LteEnbNetDevice::DlBandwidth", UintegerValue (100));
+  // Disable ideal and use real RRC protocol with RRC PDUs (cf https://www.nsnam.org/docs/models/html/lte-design.html#real-rrc-protocol-model)
+  Config::SetDefault ("ns3::LteHelper::UseIdealRrc", BooleanValue (false));
+  // Disable CQI measurement reports based on PDSCH (based on ns-3 interference model)
+  Config::SetDefault ("ns3::LteHelper::UsePdschForCqiGeneration", BooleanValue (false));
+  // Use simple round robin scheduler here (cf https://www.nsnam.org/docs/models/html/lte-design.html#round-robin-rr-scheduler)
+  Config::SetDefault ("ns3::LteHelper::Scheduler", StringValue ("ns3::RrFfMacScheduler"));
+  // Set the adpative coding and modulation model to Piro as this is the simpler one
+  Config::SetDefault ("ns3::LteAmc::AmcModel", EnumValue (LteAmc::PiroEW2010));
+  // Disable HARQ as this not support by PHY and not implemented in NI API
+  Config::SetDefault ("ns3::RrFfMacScheduler::HarqEnabled", BooleanValue (false));
+  // Set CQI timer threshold in sec - depends on CQI report frequency to be set in NiLtePhyInterface
+  Config::SetDefault ("ns3::RrFfMacScheduler::CqiTimerThreshold", UintegerValue (1000));
+  // Set the length of the window (in TTIs) for the reception of the random access response (RAR); the resulting RAR timeout is this value + 3 ms
+  Config::SetDefault ("ns3::LteEnbMac::RaResponseWindowSize", UintegerValue(10));
+
+  // Config::ConnectWithoutContext ("/NodeList/*/DeviceList/*/LteUeRrc/ConnectionEstablished", MakeCallback (&NotifyConnectionEstablishedUe));
+// Set ConnectionTimeoutDuration, after a RA attempt, if no RRC Connection Request is received before this time, the UE context is destroyed.
+  // Must account for reception of RAR and transmission of RRC CONNECTION REQUEST over UL GRANT.
+  //Config::SetDefault ("ns3::LteEnbRrc::ConnectionRequestTimeoutDuration", StringValue ("+60000000.0ns"));
+
+
+  // epc helper is used to create core network incl installation of eNB App
+  Ptr<PointToPointEpcHelper>  epcHelper = CreateObject<PointToPointEpcHelper> ();
+  // lte helper is used to install L2/L3 on eNB/UE (PHY,MAC,RRC->PDCP/RLC, eNB NetDevice)
+  Ptr<LteHelper>              lteHelper = CreateObject<LteHelper> ();
+  lteHelper->SetEpcHelper (epcHelper);
+
+  // Use simple round robin scheduler here
+  // (cf https://www.nsnam.org/docs/models/html/lte-design.html#round-robin-rr-scheduler)
+  lteHelper->SetSchedulerType ("ns3::RrFfMacScheduler");
+
+  Ptr<Node> PacketGwNode = epcHelper->GetPgwNode ();
+  Names::Add("PGW", PacketGwNode);
+  // create lte p2p link to mobile network gateway - work around for the global/static routing problem
+  NetDeviceContainer p2pLteDevices = p2pHelp.Install (MobileNetworkGwNode, PacketGwNode);
+  // assign ip adresses for p2p link
+  ipAddressHelp.SetBase (p2pLteIpSubnet, IpMask);
+  Ipv4InterfaceContainer p2pLteIpInterfaces = ipAddressHelp.Assign (p2pLteDevices);
+  Ipv4Address LanGwIpAddr = p2pLteIpInterfaces.GetAddress (0);
+
+  // lte & wifi channel / mobility  model
+  MobilityHelp.Install (wifiStaNodes);
+  MobilityHelp.Install (wifiApNode);
+  MobilityHelp.Install (enbNodes);
+  MobilityHelp.Install (ueNodes);
+
+  // Install lte net devices to the nodes
+  NetDeviceContainer enbDevices = lteHelper->InstallEnbDevice (enbNodes);
+  NetDeviceContainer ueDevices  = lteHelper->InstallUeDevice (ueNodes);
+
+  // Install the ip stack on the ue nodes
+  Ipv4InterfaceContainer ueIpInterfaces = epcHelper->AssignUeIpv4Address (NetDeviceContainer (ueDevices));
+
+  // Set the default gateway for the lte ue nodes - will be used for all outgoing packets for this node
+  for (uint32_t u = 0; u < ueNodes.GetN (); ++u)
+    {
+      Ptr<Node> TmpNode = ueNodes.Get (u);
+      Ptr<Ipv4StaticRouting> StaticRouting = ipv4RoutingHelper.GetStaticRouting (TmpNode->GetObject<Ipv4> ());
+      //Ptr<Ipv4LwaUeStaticRouting> StaticRouting = ipv4LwaUeRoutingHelper.GetStaticRouting (TmpNode->GetObject<Ipv4> ());
+      StaticRouting->SetDefaultRoute (epcHelper->GetUeDefaultGatewayAddress (), 2);
+      //StaticRouting->SetDefaultRoute (Ipv4Address (WifiGwIpAddr), 1);
+      StaticRouting->AddNetworkRouteTo (Ipv4Address (WifiIpSubnet), Ipv4Mask (IpMask),  Ipv4Address (WifiGwIpAddr), 1);
+      StaticRouting->AddNetworkRouteTo (Ipv4Address (xwLwaSubnet), Ipv4Mask (IpMask),  Ipv4Address (WifiGwIpAddr), 1);
+    }
+
+  lteHelper->AttachToClosestEnb(ueDevices, enbDevices);
+  // Attach one UE per eNodeB
+  for (uint16_t i = 0; i < ueNodes.GetN (); i++)
+    {
+      //lteHelper->Attach(ueDevices.Get(i));//Attach (ueDevices.Get(i), enbDevices.Get(0));
+      Ptr<LteUeNetDevice> ueDev = ueDevices.Get(i)->GetObject<LteUeNetDevice> ();
+      Ptr<LteUeRrc> ueRrc = ueDev->GetRrc ();
+      //ueDev->GetRrc()->GetLteUeRrcSapProvider()->
+      std::map <uint8_t, Ptr<LteDataRadioBearerInfo> > m_drbMap;
+      ObjectMapValue p;
+      // TODO: get drb map using getter instead of trace!
+      ueRrc->GetAttribute("DataRadioBearerMap", p);
+      //m_drbMap = p.Get(0)->GetObject<std::map <uint8_t, Ptr<LteDataRadioBearerInfo> > >();//->Get ();
+      std::string m_drbMapString = p.SerializeToString(MakeObjectMapChecker<LteDataRadioBearerInfo> ());
+      NS_LOG_DEBUG("DRB " << m_drbMapString << " for UE " << i);
+      ueRrc->TraceConnectWithoutContext("ConnectionEstablished", MakeCallback(&NotifyConnectionEstablishedUe));
+      ueRrc->TraceConnect("DrbCreated", to_string(ueNodes.Get(i)->GetId()), MakeCallback(&NotifyDRBCreatedUe));
+      //ueRrc->TraceConnectWithoutContext("Srb1Created", MakeCallback(&NotifySRBCreatedUe));
+      // side effect: the default EPS bearer will be activated
+      Ptr<Socket> staRxSocket = Socket::CreateSocket (ueNodes.Get(i), tid);
+		//staRxSocket->Re
+		staRxSocket->Bind (InetSocketAddress (Ipv4Address::GetAny(), 9));
+
+		ueRrc->m_staRxSocket = staRxSocket;
+		//staRxSocket->SetRecvCallback (MakeCallback (&ReceivePacket));
+		NS_LOG_INFO("STA Socket bound");
+    }
+
+  // Set the default gateway for the wifi stations
+  for (uint32_t u = 0; u < wifiStaNodes.GetN (); ++u)
+    {
+      Ptr<Node> TmpNode = wifiStaNodes.Get (u);
+      Ptr<Ipv4StaticRouting> StaticRouting = ipv4RoutingHelper.GetStaticRouting (TmpNode->GetObject<Ipv4> ());
+      StaticRouting->SetDefaultRoute (Ipv4Address (WifiGwIpAddr), 1);
+      //StaticRouting->AddNetworkRouteTo (Ipv4Address (UeIpSubnet), Ipv4Mask ("255.0.0.0"),  Ipv4Address (WifiGwIpAddr), 1);
+    }
+
+  // Set the default gateway for the lan stations
+  for (uint32_t u = 1; u < LanNodes.GetN (); ++u)
+    {
+      Ptr<Node> TmpNode = LanNodes.Get (u);
+      Ptr<Ipv4StaticRouting> StaticRouting = ipv4RoutingHelper.GetStaticRouting (TmpNode->GetObject<Ipv4> ());
+      StaticRouting->SetDefaultRoute (Ipv4Address (LanGwIpAddr), 1);
+      //StaticRouting->AddNetworkRouteTo (Ipv4Address (UeIpSubnet), Ipv4Mask ("255.0.0.0"),  Ipv4Address (LanGwIpAddr), 1);
+    }
+
+  // add route to lte network in wifi ap gateway
+  Ptr<Ipv4StaticRouting> ApGwNodeStaticRouting = ipv4RoutingHelper.GetStaticRouting (wifiApNode.Get (0)->GetObject<Ipv4> ());
+  ApGwNodeStaticRouting->AddNetworkRouteTo (Ipv4Address (UeIpSubnet), Ipv4Mask ("255.0.0.0"), 1);
+  // add route to lte network in lan mobile gateway
+  Ptr<Ipv4StaticRouting> MobileNetworkGwNodeStaticRouting = ipv4RoutingHelper.GetStaticRouting (MobileNetworkGwNode->GetObject<Ipv4> ());
+  MobileNetworkGwNodeStaticRouting->AddNetworkRouteTo (Ipv4Address (UeIpSubnet), Ipv4Mask ("255.0.0.0"), 1);
+  // MobileNetworkGwNodeStaticRouting->AddNetworkRouteTo (Ipv4Address (WifiIpSubnet), Ipv4Mask (IpMask), 2);
+  // add route from lte network to lan and wifi networks in lte packet gateway
+  Ptr<Ipv4StaticRouting> pgwStaticRouting = ipv4RoutingHelper.GetStaticRouting (PacketGwNode->GetObject<Ipv4> ());
+  // pgwStaticRouting->AddNetworkRouteTo (Ipv4Address (csmaIpSubnet), Ipv4Mask (IpMask), 2);
+  pgwStaticRouting->AddNetworkRouteTo (Ipv4Address (WifiIpSubnet), Ipv4Mask (IpMask), 2);
+
+  Ptr<Ipv4StaticRouting> lwaapRouting = ipv4RoutingHelper.GetStaticRouting (lwaapNode->GetObject<Ipv4> ());
+  lwaapRouting->SetDefaultRoute (Ipv4Address (wifiIpInterfaces.GetAddress(1)), 1);
+  //StaticRouting->SetDefaultRoute (Ipv4Address (WifiGwIpAddr), 1);
+  lwaapRouting->AddNetworkRouteTo (Ipv4Address (WifiGwIpAddr), Ipv4Mask (IpMask), 1);
+  lwaapRouting->AddNetworkRouteTo (Ipv4Address (UeIpSubnet), Ipv4Mask (IpMask),  Ipv4Address (WifiGwIpAddr), 1);
+
+  // define client and server nodes
+
+  // user always LAN node as client
+  NodeContainer ClientNode     = ueNodes.Get (0);
+  //Ipv4Address   ClientIpAddr   = p2pLteIpInterfaces;
+  NodeContainer ServerNode     = LanNodes.Get (0);
+  Ipv4Address   ServerIPAddr   = LanGwIpAddr;
+
+  // print addresses
+  std::cout << std::endl;
+  std::cout << "-------- NS-3 Topology Information ------" << std::endl;
+  //std::cout << "Number of ETH devices      = " << LanIpInterfaces.GetN() << std::endl;
+  std::cout << "Number of WiFi devices     = " << wifiIpInterfaces.GetN() << std::endl;
+  std::cout << "Number of LTE UE devices   = " << ueIpInterfaces.GetN() << std::endl;
+  std::cout << "Router GW IP Addr          = " << p2pLteIpInterfaces.GetAddress (1) << std::endl;
+  //std::cout << "WiFi Net GW IP Addr        = " << p2pWifiIpInterfaces.GetAddress(1) << std::endl;
+  std::cout << "WiFi AP IP Addr            = " << WifiGwIpAddr << std::endl;
+  std::cout << "WiFI STA#1 IP Addr         = " << wifiIpInterfaces.GetAddress(1) << std::endl;
+  std::cout << "LTE Net GW IP Addr         = " << p2pLteIpInterfaces.GetAddress(1) << std::endl;
+  std::cout << "LTE EPC PGW IP Addr        = " << PacketGwNode->GetObject<Ipv4> ()->GetAddress (1,0).GetLocal () << std::endl;
+  std::cout << "LTE UE#1 IP Addr           = " << ueIpInterfaces.GetAddress(0) << std::endl;
+  std::cout << "Xw LWA IP Addr             = " << xwLwaIpInterfaces.GetAddress (0) << std::endl;
+  //std::cout << "Xw LWIP IP Addr            = " << xwLwipIpInterfaces.GetAddress (0) << std::endl;
+  //std::cout << "Client IP Addr             = " << ClientIpAddr << std::endl;
+  std::cout << "Server IP Addr             = " << ServerIPAddr << std::endl;
+  std::cout << std::endl;
+
+  // Convert to time object
+  Time packetIntervalSec = Seconds(packetInterval*1E-03);
+
+
+  /* temperorary OnOff and packet sink*/
+    /*LwaApplicationHelper lwaServer ("ns3::TcpSocketFactory", InetSocketAddress (wifiIpInterfaces.GetAddress(1), 80));
+    ApplicationContainer tcpServer = lwaServer.Install(lwaapNode);
+    lwaApp = tcpServer.Get(0)->GetObject<LwaApplication>();*/
+
+      /*ThreeGppHttpServerHelper lwaServer(xwLwaIpInterfaces.GetAddress (0));
+      ApplicationContainer tcpServer = lwaServer.Install(lwaapNode);
+      lwaApp = tcpServer.Get(0)->GetObject<ThreeGppHttpServer>();
+      tcpServer.Start (Seconds (0.0));
+      tcpServer.Stop (Seconds (simTime));*/
+
+  /*LwaApplicationHelper clientSink(xwLwaIpInterfaces.GetAddress (0));
+      ApplicationContainer tcpClientApp = clientSink.Install(ClientNode);
+      tcpClientApp.Start (Seconds (0.0));
+      tcpClientApp.Stop (Seconds (simTime));*/
+
+  /* Install TCP/UDP Transmitter on the station */
+  uint16_t port = 80;
+  std::string representationStrings = GetCurrentWorkingDir() + "/../content/segments/BigBuckBunny/bunny_2s/dash_dataset_avc_bbb.csv";
+  fprintf(stderr, "representations = %s\n", representationStrings.c_str());
+  DASHServerHelper server(ServerIPAddr, port,  "10.1.4.1", "/content/segments/BigBuckBunny/bunny_2s/", representationStrings, "/content/segments/BigBuckBunny/bunny_2s/");
+  ApplicationContainer serverApp = server.Install (ServerNode);
+
+  int screenWidth = 1240;
+  int screenHeight = 1080;
+  std::string AdaptationLogicToUse = "RateBasedAdaptationLogic"; // DASHJSAdaptationLogic
+  AdaptationLogicToUse = "dash::player::" + AdaptationLogicToUse;
+
+  std::stringstream ssMPDURL;
+  ssMPDURL << "http://" << ServerIPAddr << "/content/segments/BigBuckBunny/bunny_2s/vid1.mpd.gz";
+  // NS_LOG_DEBUG(">>>>>>>>>>> add: " << ssMPDURL.str());
+  DASHHttpClientHelper client(ssMPDURL.str());
+  client.SetAttribute("AdaptationLogic", StringValue(AdaptationLogicToUse));
+  client.SetAttribute("StartUpDelay", StringValue("0.5"));
+  client.SetAttribute("ScreenWidth", UintegerValue(screenWidth));
+  client.SetAttribute("ScreenHeight", UintegerValue(screenHeight));
+  client.SetAttribute("AllowDownscale", BooleanValue(true));
+  client.SetAttribute("AllowUpscale", BooleanValue(true));
+  client.SetAttribute("MaxBufferedSeconds", StringValue("1600"));
+
+  ApplicationContainer sinkApp = client.Install (ClientNode);
+
+  // sink = StaticCast<PacketSink> (sinkApp.Get (0));
+
+  /* Start Applications */
+  sinkApp.Start (Seconds (0.0));
+  sinkApp.Stop (Seconds (simTime));
+  serverApp.Start (Seconds (1.0));
+
+  // lteHelper->EnableTraces();
+  // PCAP debugging
+  // p2pHelp.EnablePcapAll("lte_wifi_plus_lwa_lwip");
+  p2pHelpXw.EnablePcapAll("lte_wifi_p2p");
+  // csmaHelp.EnablePcapAll ("lte_wifi_csma", true);
+
+  wifiPhyHelp.EnablePcap ("AccessPoint", apDevices);
+  wifiPhyHelp.EnablePcap ("Station", staDevices);
+
+  // stop the simulation after simTime seconds
+  Simulator::Stop(Seconds(simTime));
+
+  /* Enable Traces */
+  fprintf(stderr, "Installing DASH Tracers on all clients\n");
+  std::string DashTraceFile = "report.csv";
+  DASHPlayerTracer::Install(ClientNode, DashTraceFile);
+
+  AsciiTraceHelper ascii;
+  ipv4RoutingHelper.PrintRoutingTableAllAt(Seconds (1), ascii.CreateFileStream ("hostRoutingTable.txt"), Time::S);
+
+  ns3::AnimationInterface *anim;
+  anim = new AnimationInterface ("animation.xml");
+  anim->AddResource("");
+
+  Config::SetDefault ("ns3::ConfigStore::Filename", StringValue ("lwa-config.xml"));
+  Config::SetDefault ("ns3::ConfigStore::Mode", StringValue ("Save"));
+  ConfigStore outputConfig;
+  outputConfig.ConfigureAttributes ();
+
+  std::cout << "[>] Start simulation" << std::endl;
+  Simulator::Run ();
+  Simulator::Destroy ();
+
+  NS_LOG_INFO ("-------- Program end! -------------------");
+  return 0;
+}
+

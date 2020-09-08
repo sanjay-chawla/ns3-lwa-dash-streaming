@@ -1,0 +1,417 @@
+//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+//%                   QoE-aware Routing Computation                  %%
+//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+//                                                                    %
+// Code for solving the QoE-aware routing problem as the              %
+// network evolves. The code can be called by ns3 to admit            %
+// a new demand, reconfigure the network according to its status and  %
+// the QoE experiend by e2e connections [1].                          %
+//                                                                    %
+// Created by                                                         %
+// - Paris Reseach Center, Huawei Technologies Co. Ltd.               %
+// - Laboratoire d'Informatique, Signaux et Systèmes de               %
+//   Sophia Antipolis (I3S) Universite Cote d'Azur and CNRS           %
+//                                                                    %
+// Contributors:                                                      %
+// - Giacomo CALVIGIONI (I3S)                                         %
+// - Ramon APARICIO-PARDO (I3S)                                       %
+// - Lucile SASSATELLI (I3S)                                          %
+// - Jeremie LEGUAY (Huawei)                                          %
+// - Stefano PARIS (Huawei)                                           %
+// - Paolo MEDAGLIANI (Huawei)                                        %
+//                                                                    %
+// References:                                                        %
+// [1] Giacomo Calvigioni, Ramon Aparicio-Pardo, Lucile Sassatelli,   %
+//     Jeremie Leguay, Stefano Paris, Paolo Medagliani,               %
+//     "Quality of Experience-based Routing of Video Traffic for      %
+//      Overlay and ISP Networks". In the Proceedings of the IEEE     %
+//     International Conference on Computer Communications            %
+//      (INFOCOM), 15-19 April 2018.                                  %
+//                                                                    %
+// Contacts:                                                          %
+// - For any question please use the address: qoerouting@gmail.com    %
+//                                                                    %
+//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+#include <iostream>
+#include <fstream>
+#include <string>
+
+
+#include "ns3/core-module.h"
+#include "ns3/point-to-point-module.h"
+#include "ns3/network-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/wifi-module.h"
+#include "ns3/mobility-module.h"
+#include "ns3/csma-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/dashplayer-tracer.h"
+#include "ns3/node-throughput-tracer.h"
+#include "ns3/ipv4-static-routing-helper.h"
+#include "ns3/ipv4-list-routing-helper.h"
+#include "ns3/ipv4-nix-vector-helper.h"
+#include "ns3/dash-http-client-helper.h"
+#include "ns3/dash-server-helper.h"
+#include "ns3/tap-bridge-module.h"
+#include "ns3/uinteger.h"
+#include "ns3/csma-module.h"
+
+#include <fstream>
+#include <string>
+#include <sstream>
+
+
+
+using namespace std;
+using namespace ns3;
+
+#include <unistd.h>
+#include<iostream>
+
+std::string GetCurrentWorkingDir( void ) {
+  char buff[250];
+  getcwd( buff, 250 );
+  std::string current_working_dir(buff);
+  return current_working_dir;
+}
+
+NS_LOG_COMPONENT_DEFINE ("HttpClientServerExample");
+
+
+
+int main (int argc, char *argv[])
+{
+  LogComponentEnable("TapBridge",LOG_LEVEL_INFO);
+  CommandLine cmd;
+  std::string requestsFile = GetCurrentWorkingDir() + "/../content/requests/demo_req.csv";
+  std::cout << requestsFile << std::endl;
+  std::string AdaptationLogicToUse = "RateBasedAdaptationLogic"; // DASHJSAdaptationLogic
+  std::string DashTraceFile = "reportP2P.csv";
+  std::string ServerThroughputTraceFile = "server_throughput.csv";
+  std::string RepresentationType = "netflix";
+
+  unsigned int BottleneckLinkCapacityInMbit = 100;
+
+  cmd.AddValue("RequestsFile", "File that contains the requests of all clients", requestsFile);
+  cmd.AddValue("BottleneckMbit", "Link capacity of the bottleneck link in Mbit/s", BottleneckLinkCapacityInMbit);
+  cmd.AddValue("DashTraceFile", "Filename of the DASH traces", DashTraceFile);
+  cmd.AddValue("ServerThroughputTraceFile", "Filename of the server throughput traces", ServerThroughputTraceFile);
+  cmd.AddValue("RepresentationType", "Input representation type name", RepresentationType);
+  cmd.AddValue("AdaptationLogic", "DASH Adaptation Logic to use", AdaptationLogicToUse);
+  cmd.Parse (argc, argv);
+  AdaptationLogicToUse = "dash::player::" + AdaptationLogicToUse;
+
+  GlobalValue::Bind ("SimulatorImplementationType", StringValue ("ns3::RealtimeSimulatorImpl"));
+  int max_simulation_time = 550; // 24 h + 10 seconds
+  //int max_simulation_time = 60 * 60 * 24 + 10; // 24 h + 10 seconds
+
+
+  // SET TCP segment size (MSS) to be NOT 536 bytes as default..., we set it to MTU - 40
+  Config::SetDefault("ns3::TcpSocket::SegmentSize", UintegerValue (1430)); // 1460 is too large it seems
+  Config::SetDefault("ns3::PointToPointNetDevice::Mtu", UintegerValue (1500)); // ETHERNET MTU
+  //Config::SetDefault("ns3::TcpSocket::InitialCwnd", UintegerValue (16)); // default: 1
+  Config::SetDefault("ns3::TcpL4Protocol::SocketType", StringValue("ns3::TcpNewReno")); // default
+  Config::SetDefault ("ns3::RateErrorModel::ErrorRate", DoubleValue (0.01));
+  Config::SetDefault ("ns3::RateErrorModel::ErrorUnit", StringValue ("ERROR_UNIT_PACKET"));
+
+  // TCP THROUGHPUT FOR LONG DISTANCES:
+  // http://bradhedlund.com/2008/12/19/how-to-calculate-tcp-throughput-for-long-distance-links/
+  // Window Size / RTT
+  // In Ns-3 TCP: SndBufSize: 131072 (128 Kilobyte)
+  //              RcvBufSize: 131072 (128 Kilobyte)
+  // https://www.nsnam.org/doxygen/classns3_1_1_tcp_socket_base.html
+  // RTT: Benjamin said 10-15 ms RTT would be okay
+
+
+  double RTT = 15; // ms
+  double RTT_per_link = RTT / 2.0;
+
+  // contains: UserId,StartsAt,StopsAt,VideoId,LinkCapacity,ScreenWidth,ScreenHeight
+
+  std::ifstream infile(requestsFile.c_str());
+  std::string line;
+
+  int number_of_users = 0;
+
+  // count number of lines
+  while (std::getline(infile, line))
+  {
+    // skip header line
+    if (line.find("UserId") != std::string::npos)
+      continue;
+
+    if (line.length() < 4)
+      continue;
+
+    number_of_users++;
+  }
+  int numClients = number_of_users;
+  infile.close();
+
+
+  NodeContainer nodes;
+  nodes.Create (2 + numClients);
+
+
+  NodeContainer serverContainer;
+  serverContainer.Add(nodes.Get(0));
+  Names::Add("Server",  nodes.Get(0));
+
+  NodeContainer routerContainer;
+  routerContainer.Add(nodes.Get(1));
+  Names::Add("Access Router",  nodes.Get(1));
+
+  NodeContainer clientContainer;
+  for (int i = 0; i < numClients; i++)
+  {
+    clientContainer.Add(nodes.Get(2+i));
+  }
+
+  double errRate = 0.05;
+  DoubleValue rate (errRate);
+  Ptr<RateErrorModel> em1 =
+    CreateObjectWithAttributes<RateErrorModel> ("RanVar", StringValue ("ns3::UniformRandomVariable[Min=0.0|Max=1.0]"), "ErrorRate", rate);
+  Ptr<RateErrorModel> em2 =
+    CreateObjectWithAttributes<RateErrorModel> ("RanVar", StringValue ("ns3::UniformRandomVariable[Min=0.0|Max=1.0]"), "ErrorRate", rate);
+
+  PointToPointHelper p2p;
+  p2p.SetDeviceAttribute ("DataRate", DataRateValue (BottleneckLinkCapacityInMbit * 1000 * 1000 )); // 100 Mbit/s
+  p2p.SetChannelAttribute ("Delay", TimeValue (MilliSeconds (RTT_per_link)));
+  // p2p.SetQueue("ns3::RedQueue", "LinkBandwidth",DataRateValue (DataRate (BottleneckLinkCapacityInMbit * 1000 * 1000)), "LinkDelay", TimeValue (MilliSeconds (RTT_per_link)));
+
+  // And then install devices and channels connecting our topology.
+  NetDeviceContainer serverToRouterDevices = p2p.Install (serverContainer.Get(0), routerContainer.Get(0));
+  vector<NetDeviceContainer> clientNetDevices;
+
+  // set up connectivity between each client and routerContainer.Get(1)l
+  fprintf(stderr, "Connecting and creating clients...\n");
+
+  //Create requests
+  infile.open(requestsFile.c_str());
+  std::string token = ",";
+  int i = 0;
+  std::string mpd_baseurl = "http://10.1.1.1/content/segments/BigBuckBunny/";
+  //std::string mpd_baseurl = "http://10.1.1.1/content/mpds/";
+  while (std::getline(infile, line))
+  {
+    // skip header line
+    if (line.find("UserId") != std::string::npos)
+      continue;
+
+    if (line.length() < 3)
+      continue;
+
+    std::istringstream iss(line);
+
+    int userId;
+    int startsAt;
+    int stopsAt;
+    int videoId;
+    int linkCapacity; // in Kbps
+    int screenWidth;
+    int screenHeight;
+
+    char c1, c2, c3, c4, c5, c6; // to eat the commas
+
+    if (!(iss >> userId >> c1 >> startsAt >> c2 >> stopsAt >> c3 >> videoId >> c4 >> linkCapacity >> c5 >> screenWidth >> c6 >> screenHeight))
+    {
+      // stop!
+      break;
+    }
+
+    fprintf(stderr, "read userid=%d, starstAt=%d, screenHeight=%d\n", userId, startsAt, screenHeight);
+
+    p2p.SetDeviceAttribute ("DataRate", DataRateValue (linkCapacity * 1000));
+    p2p.SetChannelAttribute ("Delay", TimeValue (MilliSeconds (1)));
+    // p2p.SetQueue("ns3::DropTailQueue", "MaxPackets", StringValue("100"));
+    NetDeviceContainer clientcont = p2p.Install (routerContainer.Get(0),clientContainer.Get(i));
+
+   // This enables the specified errRate on both link endpoints.
+   clientcont.Get(0)->SetAttribute("ReceiveErrorModel", PointerValue (em1));
+   clientcont.Get(1)->SetAttribute("ReceiveErrorModel", PointerValue (em2));
+
+
+
+    // add that to list
+    clientNetDevices.push_back(clientcont);
+
+    i++;
+  }
+  fprintf(stderr, "Installed %d clients!\n", i);
+  infile.close();
+
+  // initialize static routing
+  Ipv4StaticRoutingHelper staticRouting;
+  InternetStackHelper internet;
+  internet.SetRoutingHelper(staticRouting);
+  fprintf(stderr, "Installing Internet Stack\n");
+  // Now add ip/tcp stack to all nodes.
+  internet.InstallAll ();
+
+  // Server <--> Router 0
+  Ipv4AddressHelper address;
+  address.SetBase ("10.1.1.0", "255.255.255.0");
+  Ipv4InterfaceContainer interfaces = address.Assign (serverToRouterDevices);
+  Ipv4Address serverAddress (interfaces.GetAddress (0));
+
+
+  infile.open(requestsFile.c_str());
+  ApplicationContainer apps;
+  i = 0;
+  vector<int> starttimeClient;
+  while (std::getline(infile, line))
+  {
+    // skip header line
+    if (line.find("UserId") != std::string::npos)
+      continue;
+
+    if (line.length() < 3)
+      continue;
+
+    std::istringstream iss(line);
+
+    int userId;
+    int startsAt;
+    int stopsAt;
+    int videoId;
+    int linkCapacity; // in Kbps
+    int screenWidth;
+    int screenHeight;
+
+    char c1, c2, c3, c4, c5, c6; // to eat the commas
+
+    if (!(iss >> userId >> c1 >> startsAt >> c2 >> stopsAt >> c3 >> videoId >> c4 >> linkCapacity >> c5 >> screenWidth >> c6 >> screenHeight))
+    {
+      // stop!
+      break;
+    }
+
+
+    // use every 3rd IP address available for this
+    int number = i * 4;
+
+    int prefix = number / 256;
+    int suffix = number % 256;
+
+    // construct specific IP address
+    stringstream ssIP;
+    ssIP << "11.0" << "." << prefix << "." << suffix;
+    address.SetBase (ssIP.str().c_str(), "255.255.255.255");
+    NetDeviceContainer clientcont = clientNetDevices[i];
+    address.Assign(clientcont);
+    starttimeClient.push_back(startsAt);
+    stringstream clientname;
+    clientname << "Client " << i << " (User " << userId << ")";
+    Names::Add(clientname.str().c_str(),  clientContainer.Get(i));
+
+    // Create a packet sink to receive these packets
+    /*uint16_t port = 9;   
+    PacketSinkHelper sink ("ns3::UdpSocketFactory", InetSocketAddress (Ipv4Address::GetAny (), port));
+    apps = sink.Install(clientContainer.Get(i));
+    apps.Start (Seconds (startsAt));
+    apps.Stop (Seconds (stopsAt));
+    */
+    
+    // installing client
+    std::stringstream ssMPDURL;
+    ssMPDURL << mpd_baseurl << "bunny_2s/vid" << videoId+1 << ".mpd.gz";
+    DASHHttpClientHelper client(ssMPDURL.str());
+    client.SetAttribute("AdaptationLogic", StringValue(AdaptationLogicToUse));
+    client.SetAttribute("StartUpDelay", StringValue("0.5"));
+    client.SetAttribute("ScreenWidth", UintegerValue(screenWidth));
+    client.SetAttribute("ScreenHeight", UintegerValue(screenHeight));
+    client.SetAttribute("UserId", UintegerValue(userId));
+    client.SetAttribute("AllowDownscale", BooleanValue(true));
+    client.SetAttribute("AllowUpscale", BooleanValue(true));
+    client.SetAttribute("MaxBufferedSeconds", StringValue("1600"));
+
+    apps = client.Install(clientContainer.Get(i));
+    apps.Start (Seconds (startsAt));
+    apps.Stop (Seconds (stopsAt));
+    
+    fprintf(stderr, "Client starts at %d and stops at %d with address %s\n", startsAt, stopsAt+10, ssIP.str().c_str());
+
+    // schedule link up and down for those clients
+    //Simulator::Schedule(Seconds(startsAt-0.1), &Ipv4::SetUp, routerContainer.Get(0)->GetObject<Ipv4> (), i+2);
+    //Simulator::Schedule(Seconds(stopsAt+10.1), &Ipv4::SetDown, routerContainer.Get(0)->GetObject<Ipv4> (), i+2);
+
+    i++;
+  }
+
+
+  fprintf(stderr, "Installing Server\n");
+
+  //std::string representationStrings =     "content/representations/" + RepresentationType + "_vid1.csv,content/representations/" + RepresentationType + "_vid2.csv,content/representations/" + RepresentationType + "_vid3.csv,content/representations/" + RepresentationType + "_vid4.csv";
+  std::string representationStrings =     GetCurrentWorkingDir() + "/../content/segments/BigBuckBunny/bunny_2s/dash_dataset_avc_bbb.csv";
+  fprintf(stderr, "representations = %s\n", representationStrings.c_str());
+
+
+
+  //DASHServerHelper server(Ipv4Address::GetAny (), 80,  "10.1.1.1", "/content/mpds/", representationStrings, "/content/segments/");
+  DASHServerHelper server(Ipv4Address::GetAny (), 80,  "10.1.1.1", "/content/segments/BigBuckBunny/bunny_2s/", representationStrings, "/content/segments/BigBuckBunny/bunny_2s/");
+
+  apps = server.Install (serverContainer.Get(0));
+  apps.Start (Seconds (0.0));
+  apps.Stop (Seconds (max_simulation_time));
+
+
+
+  fprintf(stderr, "Installing DASH Tracers on all clients\n");
+  DASHPlayerTracer::Install(clientContainer, DashTraceFile);
+
+  fprintf(stderr, "Installing one NodeThroughputTracer\n");
+  NodeThroughputTracer::Install(serverContainer.Get(0), ServerThroughputTraceFile);
+
+
+  fprintf(stderr, "Installing Routing Tables\n");
+  // Configure Server to send all packets back via interface 1
+  Ptr<Ipv4> ipv4Server = serverContainer.Get(0)->GetObject<Ipv4> ();
+  Ptr<Ipv4StaticRouting> staticRoutingServer = staticRouting.GetStaticRouting (ipv4Server);
+  staticRoutingServer->AddNetworkRouteTo(Ipv4Address("0.0.0.0"), Ipv4Mask("/0"),
+    Ipv4Address("10.1.1.2"), 1, 0);
+
+  // Configure Access Router to send all packets for 10.1.1.1 via interface ...
+  Ptr<Ipv4> ipv4Router = routerContainer.Get(0)->GetObject<Ipv4> ();
+  Ptr<Ipv4StaticRouting> staticRoutingRouter = staticRouting.GetStaticRouting (ipv4Router);
+  staticRoutingRouter->AddHostRouteTo(serverAddress, serverAddress, 1, 0);
+
+
+  // Configure all ACTIVE clients to send all packets for anything via interface 1
+  for (int i = 0; i < numClients; i++)
+  {
+    Ptr<Ipv4> ipv4Client = clientContainer.Get(i)->GetObject<Ipv4> ();
+    Ptr<Ipv4StaticRouting> staticRoutingClient = staticRouting.GetStaticRouting (ipv4Client);
+
+    // client to server --> via interface 1
+    staticRoutingClient->AddHostRouteTo(serverAddress, 1, 0);
+
+
+    // configure the router so it can have a route to the client
+    Ipv4InterfaceAddress iaddr = ipv4Client->GetAddress (1,0);
+    Ipv4Address addri = iaddr.GetLocal ();
+
+    staticRoutingRouter->AddHostRouteTo(addri, addri, i+2, 10);
+    //Simulator::Schedule(Seconds(starttimeClient[i]-0.1), &SetupClientRoutingEntry, staticRoutingRouter, i);
+
+    // make sure all links are set to down, and activated when they are needed!
+    //ipv4Router->SetDown(i+2);
+  }
+  
+ 
+  AsciiTraceHelper ascii;
+  p2p.EnableAsciiAll (ascii.CreateFileStream ("demo.tr"));
+  p2p.EnablePcapAll ("demo");
+
+  fprintf(stderr, "Done, Starting simulation...\n");
+
+  // Finally, set up the simulator to run.  The 1000 second hard limit is a
+  // failsafe in case some change above causes the simulation to never end
+  Simulator::Stop (Seconds (max_simulation_time + 1));
+  Simulator::Run ();
+  Simulator::Destroy ();
+
+  ns3::DASHPlayerTracer::Destroy();
+
+  std::cout << "Done!" << std::endl;
+}

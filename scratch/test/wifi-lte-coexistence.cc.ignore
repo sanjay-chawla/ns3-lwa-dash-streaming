@@ -1,0 +1,592 @@
+
+#include "ns3/core-module.h"
+#include "ns3/config-store-module.h"
+#include "ns3/mobility-module.h"
+#include "ns3/gnuplot.h"
+#include "ns3/wifi-module.h"
+#include "ns3/lte-module.h"
+#include "ns3/network-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/point-to-point-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/spectrum-module.h"
+#include "ns3/laa-wifi-coexistence-module.h"
+#include "ns3/lte-spectrum-value-helper.h"
+#include <iostream>
+#include <iomanip>
+#include <sstream>
+#include <stdint.h>
+
+NS_LOG_COMPONENT_DEFINE ("Wifi11aLteDcBasic");
+
+using namespace ns3;
+
+std::ofstream Pcolfile;
+std::ofstream signalArrivalTraceFile;
+std::ofstream cwTraceFile;
+std::ofstream backoffTraceFile;
+std::ofstream phyTxTraceFile;
+std::ofstream macTxTraceFile;
+std::ofstream socketRecvTraceFile;
+std::vector<uint32_t> wifiPacketsReceived (100);
+std::vector<uint32_t> wifiBytesReceived (100);
+std::vector<double> wifiThroughputPerNode (100);
+std::vector<double> wifiPacketsSent (100);
+std::vector<uint32_t> ltePacketsReceived (100);
+std::vector<uint32_t> lteBytesReceived (100);
+std::vector<double> lteThroughputPerNode (100);
+std::vector<double> ltePacketsSent (100);
+double progress;
+// Parse context strings of the form "/NodeList/3/DeviceList/1/Mac/Assoc"
+// to extract the NodeId
+uint32_t
+ContextToNodeId1 (std::string context)
+{
+  std::string sub = context.substr (10);  // skip "/NodeList/"
+  uint32_t pos = sub.find ("/Device");
+  NS_LOG_DEBUG ("Found NodeId " << atoi (sub.substr (0, pos).c_str ()));
+  return atoi (sub.substr (0,pos).c_str ());
+}
+
+uint32_t pktSize = 100; //1500
+
+// Function calls for tracing.
+void
+SignalArrivalTrace (std::string context, bool signalType, uint32_t senderNodeId, double rxPower, Time duration)
+{
+  signalArrivalTraceFile << std::setprecision (6) << std::fixed << Simulator::Now ().GetSeconds () << (signalType ? " wifi " : " lte ") << senderNodeId << " " << rxPower << " " << duration.GetSeconds () << std::endl;
+}
+
+void
+CwTrace (std::string context, uint32_t oldVal, uint32_t newVal)
+{
+  cwTraceFile << Simulator::Now ().GetSeconds () << " " << ContextToNodeId1 (context) << " " << newVal << std::endl;
+}
+
+void
+BackoffTrace (std::string context, uint32_t newVal)
+{
+  backoffTraceFile << Simulator::Now ().GetSeconds () << " " << ContextToNodeId1 (context) << " " << newVal << std::endl;
+}
+
+void
+LteSpectrumPhyTxTrace (std::string context, Ptr<const PacketBurst> pb)
+{
+  uint32_t nodeId = ContextToNodeId1 (context);
+  if (Simulator::Now () >= Seconds (1))
+    {
+      ltePacketsSent[nodeId] += pb->GetNPackets ();
+    }
+
+}
+
+void
+PhyTxTrace (std::string context, Ptr<const Packet> p)
+{
+  phyTxTraceFile << Simulator::Now ().GetSeconds () << " " << ContextToNodeId1 (context) << " " << p->GetSize () << std::endl;
+  uint32_t nodeId = ContextToNodeId1 (context);
+  if (p->GetSize () > pktSize)
+    {
+      wifiPacketsSent[nodeId]++;
+    }
+}
+
+void
+MacTxTrace (std::string context, Ptr<const Packet> p)
+{
+  macTxTraceFile << Simulator::Now ().GetSeconds () << " " << ContextToNodeId1 (context) << " " << p->GetSize () << std::endl;
+}
+
+void
+SocketRecvTrace (std::string context, Ptr<const Packet> p, const Address &addr)
+{
+  socketRecvTraceFile << Simulator::Now ().GetSeconds () << " " << ContextToNodeId1 (context) << " " << p->GetSize () << std::endl;
+}
+
+void
+SocketRecvStats (std::string context, Ptr<const Packet> p, const Address &addr)
+{
+  uint32_t nodeId = ContextToNodeId1 (context);
+  if (Simulator::Now () >= Seconds (1))
+    {
+      wifiBytesReceived[nodeId] += p->GetSize ();
+      wifiPacketsReceived[nodeId]++;
+    }
+}
+
+void
+SinkRecvStats (std::string context, Ptr<const Packet> p, const Address &addr)
+{
+  uint32_t nodeId = ContextToNodeId1 (context);
+  // Each packet is 1024 bytes UDP payload, but at L2, we need to add 8 + 20 header bytes to support throughput calculations at the LTE layer
+  //std::cout<< "  print packet size: " << p->GetSize () << std::endl;
+  if (Simulator::Now () >= Seconds (1))
+    {
+      lteBytesReceived[nodeId] += (p->GetSize () + 20 + 8);
+      ltePacketsReceived[nodeId]++;
+  }
+}
+
+
+void
+RestartCalc ()
+{
+  std::fill (wifiBytesReceived.begin (), wifiBytesReceived.end (), 0);
+  std::fill (wifiPacketsReceived.begin (), wifiPacketsReceived.end (), 0);
+  std::fill (wifiPacketsSent.begin (), wifiPacketsSent.end (), 0);
+  std::fill (lteBytesReceived.begin (), lteBytesReceived.end (), 0);
+  std::fill (ltePacketsReceived.begin (), ltePacketsReceived.end (), 0);
+  std::fill (ltePacketsSent.begin (), ltePacketsSent.end (), 0);
+}
+
+void
+ShowProgress (void)
+{
+  std::cout << "  Progress to " << Simulator::Now ().As (Time::S) << std::endl;
+  Simulator::Schedule (Seconds (progress), &ShowProgress);
+}
+
+class Experiment
+{
+public:
+  Experiment ();
+  int Run (const WifiHelper &wifi, uint32_t pktSize, uint32_t netSize, double delta, uint32_t gridWidth, double duration, bool tracing, double lteDutyCycle, bool useAbs, Time lteDutyCyclePeriod);
+private:
+};
+
+Experiment::Experiment ()
+{
+}
+
+int
+Experiment::Run (const WifiHelper &wifi,
+                 uint32_t pktSize, uint32_t networkSize, double delta, uint32_t gridWidth, double duration, bool tracing, double lteDutyCycle, bool useAbs, Time lteDutyCyclePeriod)
+{
+  bool saveAttributeConfig = false;
+
+  NodeContainer c;
+  c.Create (networkSize);
+
+  Ptr<MultiModelSpectrumChannel> spectrumChannel;
+  Ptr<LteHelper> lteHelper;
+  Ptr<PointToPointEpcHelper> epcHelper;
+  Ptr<Node> pgw;
+  Ptr<Node> remoteHost;
+  NodeContainer remoteHostContainer;
+  NodeContainer ueNodes;
+  NodeContainer enbNodes;
+  ApplicationContainer clientApps;
+  ApplicationContainer serverApps;
+
+  lteHelper = CreateObject<LteHelper> ();
+  epcHelper = CreateObject<PointToPointEpcHelper> ();
+  lteHelper->SetEpcHelper (epcHelper);
+  lteHelper->SetEnbDeviceAttribute ("DlBandwidth", UintegerValue (100)); // 20MHz for 100 RU
+  lteHelper->SetEnbDeviceAttribute ("DlEarfcn", UintegerValue (255444));  // for 5180 MHz fc
+  pgw = epcHelper->GetPgwNode ();
+  remoteHostContainer.Create (1);
+  remoteHost = remoteHostContainer.Get (0);
+  InternetStackHelper internet;
+  internet.Install (remoteHostContainer);
+
+  // Create the Internet
+  PointToPointHelper p2ph;
+  p2ph.SetDeviceAttribute ("DataRate", DataRateValue (DataRate ("100Gb/s")));
+  p2ph.SetDeviceAttribute ("Mtu", UintegerValue (1500));
+  p2ph.SetChannelAttribute ("Delay", TimeValue (Seconds (0.00010)));
+  NetDeviceContainer internetDevices = p2ph.Install (pgw, remoteHost);
+  Ipv4AddressHelper ipv4h;
+  ipv4h.SetBase ("1.0.0.0", "255.0.0.0");
+  Ipv4InterfaceContainer internetIpIfaces = ipv4h.Assign (internetDevices);
+
+  Ipv4StaticRoutingHelper ipv4RoutingHelper;
+  Ptr<Ipv4StaticRouting> remoteHostStaticRouting = ipv4RoutingHelper.GetStaticRouting (remoteHost->GetObject<Ipv4> ());
+  remoteHostStaticRouting->AddNetworkRouteTo (Ipv4Address ("7.0.0.0"), Ipv4Mask ("255.0.0.0"), 1);
+
+  enbNodes.Create (1);
+  ueNodes.Create (1);
+
+  // Install Mobility Model
+  Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator> ();
+  for (uint16_t i = 0; i < 2; i++)
+    {
+      positionAlloc->Add (Vector (0.1 * i, 0, 0));
+    }
+  MobilityHelper mobility;
+  mobility.SetMobilityModel ("ns3::ConstantPositionMobilityModel");
+  mobility.SetPositionAllocator (positionAlloc);
+  mobility.Install (enbNodes);
+  mobility.Install (ueNodes);
+
+  // Install LTE Devices to the nodes
+  NetDeviceContainer enbLteDevs = lteHelper->InstallEnbDevice (enbNodes);
+  NetDeviceContainer ueLteDevs = lteHelper->InstallUeDevice (ueNodes);
+
+  // Install the IP stack on the UEs
+  internet.Install (ueNodes);
+  Ipv4InterfaceContainer ueIpIface;
+  ueIpIface = epcHelper->AssignUeIpv4Address (NetDeviceContainer (ueLteDevs));
+  // Assign IP address to UEs, and install applications
+  for (uint32_t u = 0; u < ueNodes.GetN (); ++u)
+    {
+      Ptr<Node> ueNode = ueNodes.Get (u);
+      // Set the default gateway for the UE
+      Ptr<Ipv4StaticRouting> ueStaticRouting = ipv4RoutingHelper.GetStaticRouting (ueNode->GetObject<Ipv4> ());
+      ueStaticRouting->SetDefaultRoute (epcHelper->GetUeDefaultGatewayAddress (), 1);
+    }
+
+  // Attach one UE per eNodeB
+  for (uint16_t i = 0; i < ueLteDevs.GetN (); i++)
+    {
+      lteHelper->Attach (ueLteDevs.Get (i), enbLteDevs.Get (i));
+      // side effect: the default EPS bearer will be activated
+    }
+
+  // Obtain channel pointer from LTE, for use in Wi-Fi
+  Ptr<LteEnbNetDevice> lteEnbNetDevice = DynamicCast<LteEnbNetDevice> (enbLteDevs.Get (0));
+  NS_ASSERT (lteEnbNetDevice);
+  Ptr<SpectrumChannel> downlinkSpectrumChannel = lteEnbNetDevice->GetPhy (0)->GetDownlinkSpectrumPhy ()->GetChannel ();
+  spectrumChannel = DynamicCast<MultiModelSpectrumChannel> (downlinkSpectrumChannel);
+  NS_ASSERT (spectrumChannel);
+
+  if (useAbs)
+    {
+      // determine the LTE Almost Blank Subframe (ABS) pattern that will implement the desired duty cycle
+      NS_ABORT_MSG_UNLESS (lteDutyCycle >= 0 && lteDutyCycle <= 1, "lteDutyCycle must be between 1 and 0");
+      std::bitset<40> absPattern;
+      // need at least two regular subframes for MIB and SIB1
+      absPattern[0] = 0;
+      absPattern[35] = 0;
+      uint32_t regularSubframes = 2;
+      int32_t subframe = 39;
+      while ((regularSubframes < 40) && (regularSubframes / 40.0 < lteDutyCycle))
+        {
+          if (subframe != 0 && subframe != 35)
+            {
+              absPattern[subframe] = 0;
+              ++regularSubframes;
+            }
+          --subframe;
+        }
+      while (subframe >= 0)
+        {
+          if (subframe != 0 && subframe != 35)
+            {
+              absPattern[subframe] = 1;
+            }
+          --subframe;
+        }
+      double actualLteDutyCycle = regularSubframes / 40.0;
+      std::cout << "LTE ABS-based duty cycle: requested " << lteDutyCycle << ", actual " << actualLteDutyCycle << ", ABS pattern " << absPattern << std::endl;
+      lteEnbNetDevice->GetRrc ()->SetAbsPattern (absPattern);
+    }
+  else
+    {
+      // Multiplying Time object directly by double value does not work
+      Time onDuration = Seconds (lteDutyCyclePeriod.GetSeconds () * lteDutyCycle);
+      std::cout << "LTE duty cycle access manager: requested " << lteDutyCycle << ", period " << lteDutyCyclePeriod.GetMilliSeconds () << " ms " << std::fixed << std::setprecision (2) << " on duration " << onDuration.GetSeconds () * 1000 << " ms" << std::endl;
+      Ptr<DutyCycleAccessManager> dutyCycleAccessManager = CreateObject<DutyCycleAccessManager> ();
+      dutyCycleAccessManager->SetDutyCyclePeriod (lteDutyCyclePeriod);
+      dutyCycleAccessManager->SetOnDuration (onDuration);
+      lteEnbNetDevice->GetPhy ()->SetChannelAccessManager (dutyCycleAccessManager);
+    }
+
+  // Install and start applications on UEs and remote host
+  uint16_t dlPort = 1234;
+  uint16_t ulPort = 2000;
+  uint16_t otherPort = 3000;
+  for (uint32_t u = 0; u < ueNodes.GetN (); ++u)
+    {
+      ++ulPort;
+      ++otherPort;
+      PacketSinkHelper dlPacketSinkHelper ("ns3::UdpSocketFactory", InetSocketAddress (Ipv4Address::GetAny (), dlPort));
+      PacketSinkHelper ulPacketSinkHelper ("ns3::UdpSocketFactory", InetSocketAddress (Ipv4Address::GetAny (), ulPort));
+      PacketSinkHelper packetSinkHelper ("ns3::UdpSocketFactory", InetSocketAddress (Ipv4Address::GetAny (), otherPort));
+      serverApps.Add (dlPacketSinkHelper.Install (ueNodes.Get (u)));
+      serverApps.Add (ulPacketSinkHelper.Install (remoteHost));
+      serverApps.Add (packetSinkHelper.Install (ueNodes.Get (u)));
+
+      UdpClientHelper dlClient (ueIpIface.GetAddress (u), dlPort);
+
+      dlClient.SetAttribute ("Interval", TimeValue (MicroSeconds (100)));
+      dlClient.SetAttribute ("MaxPackets", UintegerValue (UINT32_MAX));
+      clientApps.Add (dlClient.Install (remoteHost));
+
+    }
+	
+  serverApps.Start (Seconds (0.01));
+  clientApps.Start (Seconds (0.01));
+  // p2ph.EnablePcapAll("my-lte");
+
+  SpectrumWifiPhyHelper spectrumPhy = SpectrumWifiPhyHelper::Default ();
+  spectrumPhy.SetChannel (spectrumChannel);
+  spectrumPhy.Set ("Frequency", UintegerValue (5180)); // channel 36 at 20 MHz
+  spectrumPhy.Set ("TxPowerStart", DoubleValue (1));
+  spectrumPhy.Set ("TxPowerEnd", DoubleValue (1));
+
+  WifiMacHelper mac;
+  mac.SetType ("ns3::AdhocWifiMac");
+  NetDeviceContainer devices = wifi.Install (spectrumPhy, mac, c);
+
+  mobility.SetPositionAllocator ("ns3::GridPositionAllocator",
+                                 "MinX", DoubleValue (0.0),
+                                 "MinY", DoubleValue (0.0),
+                                 "DeltaX", DoubleValue (delta),
+                                 "DeltaY", DoubleValue (delta),
+                                 "GridWidth", UintegerValue (gridWidth),
+                                 "LayoutType", StringValue ("RowFirst"));
+  mobility.SetMobilityModel ("ns3::ConstantPositionMobilityModel");
+  mobility.Install (c);
+
+  PacketSocketHelper packetSocket;
+  packetSocket.Install (c);
+
+  uint32_t nNodes = c.GetN ();
+  ApplicationContainer apps;
+  TypeId tid = TypeId::LookupByName ("ns3::UdpSocketFactory");
+  Ptr<UniformRandomVariable> startTime = CreateObject<UniformRandomVariable> ();
+  startTime->SetAttribute ("Max", DoubleValue (200.0));
+  for (uint32_t i = 0; i < nNodes; ++i)
+    {
+      uint32_t j = (i + 1) % nNodes;
+      PacketSocketAddress socketAddr;
+      socketAddr.SetSingleDevice (devices.Get (i)->GetIfIndex ());
+      socketAddr.SetPhysicalAddress (devices.Get (j)->GetAddress ());
+      socketAddr.SetProtocol (1);
+
+      Ptr<PacketSocketClient> client = CreateObject<PacketSocketClient> ();
+      client->SetRemote (socketAddr);
+      c.Get (i)->AddApplication (client);
+      client->SetAttribute ("PacketSize", UintegerValue (pktSize));
+      client->SetAttribute ("MaxPackets", UintegerValue (0));
+      client->SetAttribute ("Interval", TimeValue (MicroSeconds (100)));
+
+      Ptr<PacketSocketServer> server = CreateObject<PacketSocketServer> ();
+      server->SetLocal (socketAddr);
+      c.Get (j)->AddApplication (server);
+    }
+
+  // Log Wifi packet receptions
+  Config::Connect ("/NodeList/*/$ns3::Node/ApplicationList/*/$ns3::PacketSocketServer/Rx", MakeCallback (&SocketRecvStats));
+
+  // Log LTE packet transmissions
+  Config::Connect ("/NodeList/*/DeviceList/*/$ns3::LteEnbNetDevice/ComponentCarrierMap/*/LteEnbPhy/DlSpectrumPhy/TxStart", MakeCallback (&LteSpectrumPhyTxTrace));
+
+
+  // Log LTE packet receptions
+  std::ostringstream oss;
+  oss << "/NodeList/" << nNodes+3 << "/$ns3::Node/ApplicationList/*/$ns3::PacketSink/Rx";
+  std::string var = oss.str();
+  Config::Connect (var, MakeCallback (&SinkRecvStats));
+
+  // Trace Phy Tx start events
+  Config::Connect ("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/$ns3::WifiPhy/PhyTxBegin", MakeCallback (&PhyTxTrace));
+  
+  if (tracing)
+    {
+      // Trace CW evolution
+      Config::Connect ("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Mac/$ns3::AdhocWifiMac/Txop/CwTrace", MakeCallback (&CwTrace));
+
+      // Trace backoff evolution
+      Config::Connect ("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Mac/$ns3::AdhocWifiMac/Txop/BackoffTrace", MakeCallback (&BackoffTrace));
+
+      // Trace packet arrivals to the Wifi device
+      Config::Connect ("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Mac/$ns3::AdhocWifiMac/MacTx", MakeCallback (&MacTxTrace));
+
+      // Trace packet receptions
+      Config::Connect ("/NodeList/*/$ns3::Node/ApplicationList/*/$ns3::PacketSocketServer/Rx", MakeCallback (&SocketRecvTrace));
+
+      // Trace signal arrivals at node 0
+      Config::Connect ("/NodeList/0/DeviceList/0/$ns3::WifiNetDevice/Phy/$ns3::SpectrumWifiPhy/SignalArrival", MakeCallback (&SignalArrivalTrace));
+    }
+  Simulator::Schedule (Seconds (5.0), &RestartCalc);
+  Simulator::Stop (Seconds (duration));
+
+  if (saveAttributeConfig)
+    {
+      // Output config store to txt format
+      Config::SetDefault ("ns3::ConfigStore::Filename", StringValue ("wifi-11a-lte-dc-attributes.txt"));
+      Config::SetDefault ("ns3::ConfigStore::FileFormat", StringValue ("RawText"));
+      Config::SetDefault ("ns3::ConfigStore::Mode", StringValue ("Save"));
+      ConfigStore outputConfig2;
+      outputConfig2.ConfigureAttributes ();
+      std::cout << "Exiting afer writing wifi-11a-lte-dc-attributes.txt" << std::endl;
+      exit (0);
+    }
+
+  if (progress)
+    {
+      Simulator::Schedule (Seconds (progress), &ShowProgress);
+    }
+  Simulator::Run ();
+  Simulator::Destroy ();
+  if (tracing)
+    {
+      signalArrivalTraceFile.flush ();
+      cwTraceFile.flush ();
+      backoffTraceFile.flush ();
+      phyTxTraceFile.flush ();
+      macTxTraceFile.flush ();
+      socketRecvTraceFile.flush ();
+    }
+  return 0;
+}
+
+int main (int argc, char *argv[])
+{
+  uint32_t verbose = 0;
+  bool tracing = false;
+  progress = 10;
+  double duration = 10;
+  uint32_t netSize = 2;
+  // uint32_t pktSize = 1500; //1500
+  double delta = 0.001;
+  uint32_t trials = 3;
+  uint32_t gridWidth = 10;
+  double lteDutyCycle = 1;
+  bool useAbs = false;
+  Time lteDutyCyclePeriod = MilliSeconds (10);
+
+  double P_col = 0;
+
+  // disable fragmentation
+  Config::SetDefault ("ns3::WifiRemoteStationManager::FragmentationThreshold", StringValue ("22000"));
+  Config::SetDefault ("ns3::WifiRemoteStationManager::RtsCtsThreshold", StringValue ("22000"));
+  // Disable short retransmission failure (make retransmissions persistent)
+  Config::SetDefault ("ns3::WifiRemoteStationManager::MaxSlrc", UintegerValue (8));
+
+  // Configure start time of access manager
+  Config::SetDefault ("ns3::LteEnbPhy::ChannelAccessManagerStartTime", TimeValue (Seconds (1)));
+
+  CommandLine cmd;
+  cmd.AddValue ("verbose", "Show log output (default is 0: no log)", verbose);
+  cmd.AddValue ("useAbs",  "Use ABS mode of duty cycling (40 ms cycle)", useAbs);
+  cmd.AddValue ("lteDutyCycle", "LTE duty cycle fraction of time (0 to 1)", lteDutyCycle);
+  cmd.AddValue ("lteDutyCyclePeriod", "LTE duty cycle period", lteDutyCyclePeriod);
+  cmd.AddValue ("tracing", "Generate trace files", tracing);
+  cmd.AddValue ("netSize", "The maximum network size", netSize);
+  cmd.AddValue ("pktSize", "The frame size", pktSize);
+  cmd.AddValue ("trials", "The maximal number of runs per network size", trials);
+  cmd.AddValue ("delta", "The delta offset in grid topology", delta);
+  cmd.AddValue ("gridWidth", "The width of the grid", gridWidth);
+  cmd.AddValue ("duration", "Time duration for each trial (seconds)", duration);
+  cmd.AddValue ("showProgress", "time interval (sec) for showing execution progress; zero to disable", progress);
+  cmd.Parse (argc, argv);
+
+  if (tracing)
+    {
+      signalArrivalTraceFile.open ("wifi-11a-lte-dc-signal-trace.out");
+      cwTraceFile.open ("wifi-11a-lte-dc-cw-trace.out");
+      backoffTraceFile.open ("wifi-11a-lte-dc-backoff-trace.out");
+      phyTxTraceFile.open ("wifi-11a-lte-dc-phy-tx-trace.out");
+      macTxTraceFile.open ("wifi-11a-lte-dc-mac-tx-trace.out");
+      socketRecvTraceFile.open ("wifi-11a-lte-dc-socket-recv-trace.out");
+    }
+  Pcolfile.open ("OutPutFile.out");
+  if (verbose == 1)
+    {
+      LogComponentEnable ("Wifi11aLteDcBasic", LOG_LEVEL_ALL);
+    }
+  else if (verbose == 2)
+    {
+      LogComponentEnable ("Wifi11aLteDcBasic", LOG_LEVEL_ALL);
+      LogComponentEnable ("DcfManager", LOG_LEVEL_ALL);
+      LogComponentEnable ("Txop", LOG_LEVEL_ALL);
+      LogComponentEnable ("QosTxop", LOG_LEVEL_ALL);
+    }
+  else if (verbose == 3)
+    {
+      LogComponentEnable ("Wifi11aLteDcBasic", LOG_LEVEL_ALL);
+      WifiHelper h;
+      h.EnableLogComponents ();
+    }
+
+  std::stringstream ss;
+  ss << "wifi-11a-lte-dc-" << netSize << "-p-" << pktSize << "-throughput.plt";
+  std::ofstream netSizeThroughputPlot (ss.str ().c_str ());
+  ss.str ("");
+  ss << "wifi-11a-lte-dc-" << netSize << "-p-" << pktSize << "-throughput.eps";
+  Gnuplot gnuplot = Gnuplot (ss.str ());
+
+  WifiHelper wifi;
+  wifi.SetStandard (WIFI_PHY_STANDARD_80211a);
+
+  NS_LOG_DEBUG ("6");
+  Experiment experiment;
+  wifi.SetRemoteStationManager ("ns3::ConstantRateWifiManager",
+                                "DataMode", StringValue ("OfdmRate6Mbps")); // OfdmRate12Mbps // OfdmRate54Mbps
+
+  
+  double mean_t, throughput;
+  double mean_pcol;
+
+  for (uint32_t p_inc = 50; p_inc <= 1950 ; p_inc += 50)
+    {
+      pktSize = 50 + p_inc;
+      mean_t = 0;
+      mean_pcol=0;
+
+      for (uint32_t run_index = 1; run_index <= trials; run_index++)
+        {
+
+          std::fill (wifiBytesReceived.begin (), wifiBytesReceived.end (), 0);
+          std::fill (wifiPacketsReceived.begin (), wifiPacketsReceived.end (), 0);
+          std::fill (lteBytesReceived.begin (), lteBytesReceived.end (), 0);
+          std::fill (ltePacketsReceived.begin (), ltePacketsReceived.end (), 0);
+          throughput = 0;
+
+          std::cout << "Trial " << run_index << " of " << trials << "; 6 Mb/s for " << pktSize << " packetsize " << std::endl;
+          if (tracing)
+            {
+              cwTraceFile << "# Trial " << run_index << " of " << trials << "; 6 Mb/s for " << netSize << " nodes" << std::endl;
+              backoffTraceFile << "# Trial " << run_index << " of " << trials << "; 6 Mb/s for " << netSize << " nodes" << std::endl;
+              phyTxTraceFile << "# Trial " << run_index << " of " << trials << "; 6 Mb/s for " << netSize << " nodes" << std::endl;
+              macTxTraceFile << "# Trial " << run_index << " of " << trials << "; 6 Mb/s for " << netSize << " nodes" << std::endl;
+              socketRecvTraceFile << "# Trial " << run_index << " of " << trials << "; 6 Mb/s for " << netSize << " nodes" << std::endl;
+            }
+          experiment.Run (wifi, pktSize, netSize, delta, gridWidth, duration, tracing, lteDutyCycle, useAbs, lteDutyCyclePeriod);
+          double avg;
+          for (uint32_t k = 0; k < netSize; k++)
+            {
+              wifiThroughputPerNode[k] = (double)(wifiBytesReceived[k]* 8) / 1000 / 1000 / 5;  // for 100 seconds
+              std::cout << "Node " << k << "; wifi throughput " << wifiThroughputPerNode[k] << std::endl;
+              throughput += wifiThroughputPerNode[k];
+              if (wifiPacketsSent[k] > 0)
+                {
+                  P_col += (wifiPacketsSent[k] - wifiPacketsReceived[(k + 1) % netSize]) / wifiPacketsSent[k];
+                }
+              std::cout << P_col << std::endl;
+              avg += P_col;
+              P_col = 0;
+            }
+          // For network size 'n', the receive sink will be node 'n+3'
+          //std::cout << "lte Packets: " << lteBytesReceived[netSize+3] <<std::endl;
+          double lteThroughput = (double)(lteBytesReceived[netSize+3]* 8) / 1000 / 1000 / 5 ;
+          std::cout << "P collision Avg " << avg / netSize << std::endl;
+          std::cout << "Total wifi throughput " << throughput << std::endl;
+          std::cout << "Total LTE throughput " << lteThroughput << std::endl;
+         
+          mean_t += throughput;
+          mean_pcol += avg / netSize;
+          avg = 0;
+        }
+      mean_t = mean_t / trials;
+      mean_pcol = mean_pcol / trials;
+
+      Pcolfile << pktSize << ", " << mean_t << ", " << mean_pcol<< std::endl;
+    }
+
+  Pcolfile.close ();
+  
+  if (tracing)
+    {
+      signalArrivalTraceFile.close ();
+      cwTraceFile.close ();
+      backoffTraceFile.close ();
+      phyTxTraceFile.close ();
+      macTxTraceFile.close ();
+      socketRecvTraceFile.close ();
+    }
+  return 0;
+}
+

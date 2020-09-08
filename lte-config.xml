@@ -1,0 +1,31 @@
+<ns3>
+ <default name="ns3::LteEnbNetDevice::UlBandwidth" value="50" />
+ <default name="ns3::LteEnbNetDevice::DlBandwidth" value="50" />
+ <default name="ns3::LteSpectrumPhy::DataErrorModelEnabled" value="true" />
+ <default name="ns3::LteSpectrumPhy::CtrlErrorModelEnabled" value="true" />
+ <default name="ns3::LteAmc::Ber" value="0.00005" />
+ <default name="ns3::LteEnbRrc::DefaultTransmissionMode" value="1" />
+ <default name="ns3::LteHelper::Scheduler" value="ns3::RrFfMacScheduler" />
+ <default name="ns3::LteHelper::HandoverAlgorithm" value="ns3::A2A4RsrqHandoverAlgorithm" />
+ <default name="ns3::RadioBearerStatsCalculator::EpochDuration" value="0.1" />
+ <default name="ns3::RadioBearerStatsCalculator::EpochDuration" value="0.4" />
+ <global name="SimulatorImplementationType" value="ns3::DefaultSimulatorImpl" />
+ <global name="RngSeed" value="1" />
+ <global name="RngRun" value="1" />
+ <global name="nMacroEnbSites" value="19" />
+ <global name="nMacroEnbSitesX" value="4" />
+ <global name="macroUeDensity" value="0.00001036" /> 
+ <global name="macroEnbTxPowerDbm" value="46" />
+ <global name="macroEnbBandwidth" value="100" />
+ <global name="simTime" value="60" /> 
+ <global name="generateRem" value="false" />
+ <global name="remRbId" value="-1" />
+ <global name="epc" value="true" />
+ <global name="epcDl" value="true" />
+ <global name="epcUl" value="true" />
+ <global name="useUdp" value="false" />
+ <global name="numBearersPerUe" value="1" />
+ <global name="outdoorUeMinSpeed" value="0.833" />
+ <global name="outdoorUeMaxSpeed" value="0.833" />
+ <global name="dashSegmentDuration" value="2" />
+</ns3>

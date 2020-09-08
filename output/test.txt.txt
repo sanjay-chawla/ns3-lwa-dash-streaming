@@ -1,0 +1,11 @@
+FAIL: Test Suite "lbt-access-manager" (0.010)
+PASS: Test Suite "LbtAccessManager receive one request one" (0.000)
+PASS: Test Suite "LbtAccessManager test transmit immediately after request if previously idle" (0.000)
+FAIL: Test Suite "LbtAccessManager defer and backoff after request" (0.000)
+    Details:
+      Message:   Access provided too early or late
+      Condition: m_accessGrantedTimes[1].GetMicroSeconds () (actual) == expectedExpiration1 (limit)
+      Actual:    7002973
+      Limit:     7002982
+      File:      ../src/laa-wifi-coexistence/test/lbt-access-manager-test.cc
+      Line:      390

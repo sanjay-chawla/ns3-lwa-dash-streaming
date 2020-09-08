@@ -1,0 +1,389 @@
+/* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
+/*
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation;
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *
+ * Author: Sanjay Chawla <schawla@tcd.ie>
+ */
+
+#include <iostream>
+#include <fstream>
+
+#include "ns3/realtime-simulator-impl.h"
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/csma-module.h"
+#include "ns3/tap-bridge-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/node-throughput-tracer.h"
+#include "ns3/ipv4-static-routing-helper.h"
+#include "ns3/point-to-point-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/AMuSt-module.h"
+#include "ns3/dash-http-client-helper.h"
+#include "ns3/config-store-module.h"
+#include "ns3/lte-helper.h"
+#include "ns3/epc-helper.h"
+#include "ns3/mobility-module.h"
+#include "ns3/buildings-module.h"
+#include "ns3/building-position-allocator.h"
+#include "ns3/netanim-module.h"
+#include "ns3/wifi-module.h"
+#include "ns3/wifi-mac-helper.h"
+#include "ns3/virtual-net-device.h"
+
+using namespace std;
+using namespace ns3;
+
+#include <unistd.h>
+#include <iostream>
+#include <fstream>
+
+
+std::string GetCurrentWorkingDir( void ) {
+  char buff[250];
+  char* cwd = getcwd( buff, 250 );
+  std::cout << cwd;
+  std::string current_working_dir(buff);
+  return current_working_dir;
+}
+
+template <typename T>
+std::string ToString(T val)
+{
+    std::stringstream stream;
+    stream << val;
+    return stream.str();
+}
+
+
+NS_LOG_COMPONENT_DEFINE ("WifiDashSimulationExample");
+
+int
+main (int argc, char *argv[])
+{
+
+  LogComponentEnable ("WifiDashSimulationExample", LOG_PREFIX_TIME);
+  LogComponentEnable ("DASHFakeServerApplication", LOG_LEVEL_ALL);
+  LogComponentEnable ("HttpServerApplication", LOG_LEVEL_ALL);
+  LogComponentEnable ("ns3.DASHPlayerTracer", LOG_LEVEL_ALL);
+  LogComponentEnable ("MultimediaConsumer", LOG_LEVEL_ALL);
+  // LogComponentEnable ("HttpClientApplication", LOG_LEVEL_ALL);
+
+  uint32_t simulationId = 1;
+  uint32_t numberOfClients = 1;
+  Time interPacketInterval = MilliSeconds (100);
+  double simTime = 10.1;
+  bool disableDl = false;
+  bool disableUl = false;
+  // bool disablePl = true;
+
+  std::string DashTraceFile = "report.csv";
+  std::string ServerThroughputTraceFile = "server_throughput.csv";
+  std::string RepresentationType = "netflix";
+
+  CommandLine cmd;
+  cmd.AddValue("numberOfClients", "Number of UEs in total", numberOfClients);
+  cmd.AddValue("simTime", "Total duration of the simulation [s])", simTime);
+  cmd.AddValue("interPacketInterval", "Inter packet interval [ms])", interPacketInterval);
+  cmd.Parse (argc, argv);
+
+  Config::SetDefault("ns3::TcpSocket::SegmentSize", UintegerValue (1446));
+  Config::SetDefault("ns3::TcpSocket::SndBufSize", UintegerValue (524288));
+  Config::SetDefault("ns3::TcpSocket::RcvBufSize", UintegerValue (524288));
+
+  Config::SetDefault("ns3::PointToPointNetDevice::DataRate", StringValue("100Gbps"));
+  Config::SetDefault("ns3::PointToPointChannel::Delay", StringValue("5ms"));
+
+  ConfigStore inputConfig;
+  inputConfig.ConfigureDefaults();
+
+  cmd.Parse(argc, argv);
+
+  // GlobalValue::Bind ("SimulatorImplementationType", StringValue ("ns3::RealtimeSimulatorImpl"));
+  // GlobalValue::Bind ("ChecksumEnabled", BooleanValue (true));
+
+  WifiHelper wifi;
+  WifiMacHelper wifiMac;
+
+  NodeContainer wifiStaNodes ;
+  NodeContainer wifiApNode ;
+  wifiApNode.Create (1) ;
+  wifiStaNodes.Create (numberOfClients) ;
+
+  // Create a channel helper and phy helper, and then create the channel
+  YansWifiChannelHelper channel = YansWifiChannelHelper::Default ();
+  channel.SetPropagationDelay ("ns3::ConstantSpeedPropagationDelayModel");
+  channel.AddPropagationLoss ("ns3::LogDistancePropagationLossModel",
+                                  "Exponent", DoubleValue (3.0));
+  YansWifiPhyHelper phy = YansWifiPhyHelper::Default ();
+  phy.SetChannel (channel.Create ());
+
+  // Declare NetDeviceContainers to hold the container returned by the helper
+  NetDeviceContainer wifiStaDevices;
+  NetDeviceContainer wifiApDevice;
+
+  // Perform the installation
+  Ssid ssid = Ssid ("ns3-wifi");
+  wifiMac.SetType ("ns3::StaWifiMac",
+		  "Ssid", SsidValue (ssid));
+  wifiStaDevices = wifi.Install (phy, wifiMac, wifiStaNodes);
+  wifiMac.SetType ("ns3::ApWifiMac",
+		  "Ssid", SsidValue (ssid));
+  wifiApDevice = wifi.Install (phy, wifiMac, wifiApNode);
+
+  Config::Set ("/NodeList/*/DeviceList/*/$ns3::WifiNetDevice/Phy/ChannelWidth", UintegerValue (40));
+
+
+  // Create a single RemoteHost
+  NodeContainer remoteHostContainer;
+  remoteHostContainer.Create (1);
+  Ptr<Node> remoteHost = remoteHostContainer.Get (0);
+  Names::Add("RemoteHost", remoteHost);
+
+
+  InternetStackHelper internet;
+  Ipv4StaticRoutingHelper ipv4RoutingHelper;
+  internet.SetRoutingHelper(ipv4RoutingHelper);
+  internet.InstallAll();
+  //internet.Install (remoteHostContainer);
+  //internet.Install (wifiStaNodes);
+  //internet.Install (wifiApNode);
+
+
+  // Create the Internet
+  PointToPointHelper p2ph;
+  p2ph.SetDeviceAttribute ("DataRate", DataRateValue (DataRate ("100Gb/s")));
+  p2ph.SetDeviceAttribute ("Mtu", UintegerValue (1500));
+  p2ph.SetChannelAttribute ("Delay", TimeValue (Seconds (0.010)));
+  NetDeviceContainer internetDevices = p2ph.Install (wifiApNode.Get(0), remoteHost);
+
+  Ipv4AddressHelper ipv4h;
+
+  ipv4h.SetBase ("10.0.0.0", "255.0.0.0");
+  Ipv4InterfaceContainer internetIpIfaces = ipv4h.Assign (internetDevices);
+  Ipv4Address remoteHostAddr = internetIpIfaces.GetAddress (1);
+
+  ipv4h.SetBase ("192.168.1.0", "255.255.255.0");
+  ipv4h.Assign (wifiApDevice);
+  Ipv4InterfaceContainer staIpIfaces = ipv4h.Assign (wifiStaDevices);
+
+  // Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+
+  fprintf(stderr, "Installing Routing Tables\n");
+  // Configure Server to send all packets back via interface 1
+  Ptr<Ipv4> ipv4RemoteHost = remoteHost->GetObject<Ipv4> ();
+  Ptr<Ipv4StaticRouting> staticRoutingRemoteHost = ipv4RoutingHelper.GetStaticRouting (ipv4RemoteHost);
+  staticRoutingRemoteHost->AddNetworkRouteTo(Ipv4Address("0.0.0.0"), Ipv4Mask("/0"),
+  Ipv4Address("10.0.0.1"), 1, 0);
+
+  // Configure Access Router to send all packets for 10.1.1.1 via interface ...
+  Ptr<Ipv4> ipv4Router = wifiApNode.Get(0)->GetObject<Ipv4> ();
+  Ptr<Ipv4StaticRouting> staticRoutingRouter = ipv4RoutingHelper.GetStaticRouting (ipv4Router);
+  staticRoutingRouter->AddHostRouteTo(remoteHostAddr, remoteHostAddr, 1, 0);
+  // staticRoutingRouter->AddNetworkRouteTo(Ipv4Address("0.0.0.0"), Ipv4Mask("/0"), 1, 0);
+
+  // Configure all ACTIVE clients to send all packets for anything via interface 1
+  for (uint i = 0; i < numberOfClients; i++)
+  {
+    Ptr<Ipv4> ipv4Client = wifiStaNodes.Get(i)->GetObject<Ipv4> ();
+    Ptr<Ipv4StaticRouting> staticRoutingClient = ipv4RoutingHelper.GetStaticRouting (ipv4Client);
+
+    // client to server --> via interface 1
+    staticRoutingClient->AddHostRouteTo(remoteHostAddr, 1, 0);
+    staticRoutingClient->AddNetworkRouteTo(Ipv4Address("0.0.0.0"), Ipv4Mask("/0"), Ipv4Address("192.168.1.1"), 1, 0);
+
+
+    // configure the router so it can have a route to the client
+    Ipv4InterfaceAddress iaddr = ipv4Client->GetAddress (1,0);
+    Ipv4Address addri = iaddr.GetLocal ();
+
+    staticRoutingRouter->AddHostRouteTo(addri, addri, i+2, 10);
+    //Simulator::Schedule(Seconds(starttimeClient[i]-0.1), &SetupClientRoutingEntry, staticRoutingRouter, i);
+
+    // make sure all links are set to down, and activated when they are needed!
+    //ipv4Router->SetDown(i+2);
+  }
+
+
+  //////////////////////////////////////////////////////////////////////////////////////////////////
+  //// Set up Building
+  //////////////////////////////////////////////////////////////////////////////////////////////////
+  double roomHeight = 6;
+  double roomLength = 6;
+  double roomWidth = 5;
+  uint32_t xRooms = 8;
+  uint32_t yRooms = 3;
+  uint32_t nFloors = 6;
+
+  Ptr<Building> b = CreateObject <Building> ();
+  b->SetBoundaries (Box ( 0.0, xRooms * roomWidth,
+                          10.0, yRooms * roomLength,
+                          0.0, nFloors * roomHeight));
+  b->SetBuildingType (Building::Office);
+  b->SetExtWallsType (Building::ConcreteWithWindows);
+  b->SetNFloors (6);
+  b->SetNRoomsX (8);
+  b->SetNRoomsY (3);
+
+  Ptr<Building> b2 = CreateObject <Building> ();
+  b2->SetBoundaries (Box ( 50.0, xRooms * roomWidth,
+   							10.0, yRooms * roomLength,
+   							0.0, nFloors * roomHeight));
+  b2->SetBuildingType (Building::Office);
+  b2->SetExtWallsType (Building::ConcreteWithWindows);
+  b2->SetNFloors (7);
+  b2->SetNRoomsX (6);
+  b2->SetNRoomsY (4);
+
+  // Install Mobility Model
+  Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator> ();
+
+  Ptr<RandomBuildingPositionAllocator> randPosAlloc = CreateObject<RandomBuildingPositionAllocator> ();
+  randPosAlloc->AssignStreams (simulationId);
+
+  // allocate Enb positions
+  positionAlloc->Add(Vector(30, 0.0, 50.0));
+
+  // allocate clients to positions
+  for (uint i = 0; i < numberOfClients; i++)
+    {
+      // Vector pos = Vector (randPosAlloc->GetNext());
+      // positionAlloc->Add (pos);
+      positionAlloc->Add(Vector(i*60+30, 5.0, 0.0));
+    }
+
+  NS_LOG_DEBUG("before mobility set");
+  MobilityHelper staticMobility;
+  staticMobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+  staticMobility.SetPositionAllocator(positionAlloc);
+  staticMobility.Install (wifiApNode);
+  staticMobility.Install (wifiStaNodes);
+
+  BuildingsHelper::Install (wifiApNode);
+  BuildingsHelper::Install (wifiStaNodes);
+
+  NS_LOG_DEBUG("after mobility consistent");
+
+  // Install and start applications on UEs and remote host
+  uint16_t port = 80;
+  //uint16_t dlPort = 1100;
+  //uint16_t ulPort = 2000;
+  // uint16_t otherPort = 3000;
+  ApplicationContainer serverApps;
+  ApplicationContainer clientApps;
+
+  /* Install TCP Receiver on the access point */
+
+  std::string representationStrings = GetCurrentWorkingDir() + "/../content/segments/BigBuckBunny/bunny_2s/dash_dataset_avc_bbb.csv";
+  fprintf(stderr, "representations = %s\n", representationStrings.c_str());
+  DASHServerHelper server(Ipv4Address::GetAny(), port,  "10.0.0.2", "/content/segments/BigBuckBunny/bunny_2s/", representationStrings, "/content/segments/BigBuckBunny/bunny_2s/");
+  serverApps = server.Install (remoteHost);
+  serverApps.Start (Seconds (1.0));
+  serverApps.Stop (Seconds (60.0));
+
+  int screenWidth = 1240;
+  int screenHeight = 1080;
+  std::string AdaptationLogicToUse = "RateBasedAdaptationLogic"; // DASHJSAdaptationLogic
+  AdaptationLogicToUse = "dash::player::" + AdaptationLogicToUse;
+  for (uint32_t u = 0; u < wifiStaNodes.GetN (); ++u)
+      {
+
+        if (!disableDl)
+          {
+            // PacketSinkHelper dlPacketSinkHelper ("ns3::UdpSocketFactory", InetSocketAddress (Ipv4Address::GetAny (), dlPort));
+            // serverApps.Add (dlPacketSinkHelper.Install (wifiStaNodes.Get (u)));
+
+            //UdpClientHelper dlClient (staIpIfaces.GetAddress (u), dlPort);
+            //dlClient.SetAttribute ("Interval", TimeValue (interPacketInterval));
+            //dlClient.SetAttribute ("MaxPackets", UintegerValue (1000000));
+            //clientApps.Add (dlClient.Install (remoteHost));
+
+            /*
+			 HttpClientHelper client(remoteHostAddr, port,
+							"content/segments/BigBuckBunny/bunny_2s/vid1.mpd.gz", "localhost");
+			clientApps.Add(client.Install(ueNodes.Get(u)));
+			 */
+			// installing client
+			std::stringstream ssMPDURL;
+			ssMPDURL << "http://" << remoteHostAddr << "/content/segments/BigBuckBunny/bunny_2s/vid1.mpd.gz";
+			// NS_LOG_DEBUG(">>>>>>>>>>> add: " << ssMPDURL.str());
+			DASHHttpClientHelper client(ssMPDURL.str());
+			client.SetAttribute("AdaptationLogic", StringValue(AdaptationLogicToUse));
+			client.SetAttribute("StartUpDelay", StringValue("0.5"));
+			client.SetAttribute("ScreenWidth", UintegerValue(screenWidth));
+			client.SetAttribute("ScreenHeight", UintegerValue(screenHeight));
+			client.SetAttribute("AllowDownscale", BooleanValue(true));
+			client.SetAttribute("AllowUpscale", BooleanValue(true));
+			client.SetAttribute("MaxBufferedSeconds", StringValue("1600"));
+
+			clientApps.Add(client.Install(wifiStaNodes.Get(u)));
+
+          }
+
+        if (!disableUl)
+          {
+            //++ulPort;
+            //PacketSinkHelper ulPacketSinkHelper ("ns3::UdpSocketFactory", InetSocketAddress (Ipv4Address::GetAny (), ulPort));
+            //serverApps.Add (ulPacketSinkHelper.Install (remoteHost));
+
+            //UdpClientHelper ulClient (remoteHostAddr, ulPort);
+            //ulClient.SetAttribute ("Interval", TimeValue (interPacketInterval));
+            //ulClient.SetAttribute ("MaxPackets", UintegerValue (1000000));
+            //clientApps.Add (ulClient.Install (wifiStaNodes.Get(u)));
+          }
+
+        /*if (!disablePl && numberOfEnbs > 1)
+          {
+            ++otherPort;
+            PacketSinkHelper packetSinkHelper ("ns3::UdpSocketFactory", InetSocketAddress (Ipv4Address::GetAny (), otherPort));
+            serverApps.Add (packetSinkHelper.Install (wifiStaNodes.Get (u)));
+
+            UdpClientHelper client (staIpIfaces.GetAddress (u), otherPort);
+            client.SetAttribute ("Interval", TimeValue (interPacketInterval));
+            client.SetAttribute ("MaxPackets", UintegerValue (1000000));
+            clientApps.Add (client.Install (wifiStaNodes.Get ((u + 1) % numberOfEnbs)));
+          }*/
+      }
+  clientApps.Start (Seconds (2));
+  clientApps.Stop (Seconds (47));
+
+
+  fprintf(stderr, "Installing DASH Tracers on all clients\n");
+  DASHPlayerTracer::Install(wifiStaNodes, DashTraceFile);
+
+  fprintf(stderr, "Installing one NodeThroughputTracer\n");
+  NodeThroughputTracer::Install(remoteHost, ServerThroughputTraceFile);
+  p2ph.EnablePcapAll("wifi-dash-streaming-p2p-", true);
+  // NS_LOG_UNCOND("Installing Routing Tables");
+
+  phy.SetPcapDataLinkType (WifiPhyHelper::DLT_IEEE802_11_RADIO);
+  phy.EnablePcap ("AccessPoint", wifiApDevice);
+  phy.EnablePcap ("Station", wifiStaDevices);
+
+  AsciiTraceHelper ascii;
+  p2ph.EnableAsciiAll (ascii.CreateFileStream ("wifi-dash-streaming.tr"));
+  phy.EnableAsciiAll (ascii.CreateFileStream ("wifi-simple-adhoc-grid.tr"));
+  phy.EnablePcap ("wifi-simple-adhoc-grid", wifiStaDevices);
+  Ipv4RoutingHelper::PrintRoutingTableAllEvery(Seconds(5), ascii.CreateFileStream ("hostRoutingTable.txt"), Time::S);
+
+  //
+  // Run the simulation for ten minutes to give the user time to play around
+  //
+  Simulator::Stop (Seconds (60.));
+  ns3::AnimationInterface *anim;
+  anim = new AnimationInterface ("animation.xml");
+  anim->AddResource("");
+  Simulator::Run ();
+  Simulator::Destroy ();
+}

@@ -1,0 +1,9 @@
+Time	Node	UserId	SegmentNumber	SegmentRepID	SegmentExperiencedBitrate(bit/s)	BufferLevel(s)	StallingTime(msec)	SegmentDepIds
+3.583	3	0	0	1	3291428	0	3582	
+3.585	4	0	0	1	2979310	0	3584	
+18.583	3	0	1	15	4107998	0	0	
+18.585	4	0	1	14	3592382	0	0	
+33.583	3	0	2	18	2985966	0	0	
+33.585	4	0	2	17	4389004	15	0	
+48.583	3	0	3	17	4271167	0	0	
+48.585	4	0	3	20	4886672	15	0	

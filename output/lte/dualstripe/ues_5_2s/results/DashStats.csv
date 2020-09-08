@@ -1,0 +1,6 @@
+Node,StartUpDelay,StartUpLabel,AvgDownloadRate,StdDownloadRate,AvgBufferLevel,StdBufferLevel,StallEvents,RebufferingRatio,StallLabel,TotalStallingTime,AvgTimeStallingEvents,AvgVideoBitRate,AvgVideoQualityVariation,RSDVideoBitRate,AvgDownloadBitRate
+2,5357,LowDelay,2.79318e+06,113674,4.77778,1.78125,0,0,NoStalling,0,0,2194.44,62.5,26.5051,2.79318e+06
+3,5359,LowDelay,2.80103e+06,97793.9,4.77778,1.78125,0,0,NoStalling,0,0,2194.44,62.5,26.5051,2.80103e+06
+4,5359,LowDelay,2.79981e+06,107625,4.77778,1.78125,0,0,NoStalling,0,0,2194.44,62.5,26.5051,2.79981e+06
+5,5359,LowDelay,2.71225e+06,331371,4.22222,1.74978,0,0,NoStalling,0,0,2138.89,62.5,28.3593,2.71225e+06
+6,0,VeryHighDelay,0,0,0,0,0,0,NoStalling,0,0,0,0,0,0

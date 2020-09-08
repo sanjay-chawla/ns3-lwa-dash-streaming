@@ -1,0 +1,5 @@
+Node,StartUpDelay,AvgDownloadRate,StdDownloadRate,AvgBufferLevel,StdBufferLevel,StallEvents,RebufferingRatio,StallLabel,TotalStallingTime,AvgTimeStallingEvents,AvgVideoBitRate,AvgVideoQualityVariation,RSDVideoBitRate,AvgDownloadBitRate,Tinit,Frebuf,Trebuf,MOS
+3,3457,2.80785e+06,97742.1,4.2069,2.59149,0,0,NoStalling,0,0,2272.41,37.037,20.6374,2.80785e+06,2,1,1,3.2476
+4,3459,2.81272e+06,85646.3,4.2069,2.59149,0,0,NoStalling,0,0,2272.41,37.037,20.6374,2.81272e+06,2,1,1,3.2476
+5,3459,2.81298e+06,93985.2,4.27586,2.50374,0,0,NoStalling,0,0,2272.41,37.037,20.6374,2.81298e+06,2,1,1,3.2476
+6,3459,2.75753e+06,269755,3.93103,2.54519,0,0,NoStalling,0,0,2237.93,37.037,22.0915,2.75753e+06,2,1,1,3.2476

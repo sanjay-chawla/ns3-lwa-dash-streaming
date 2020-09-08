@@ -1,0 +1,5 @@
+ClientNode,ServerNode,StartsAt,StopsAt,VideoId,LinkCapacity,ScreenWidth,ScreenHeight
+3,0,2,60,0,3337,800,480
+4,0,2,60,0,3337,1024,600
+5,0,2,60,0,3337,1240,720
+6,0,2,60,0,3337,800,480

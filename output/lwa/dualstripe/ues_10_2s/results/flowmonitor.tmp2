@@ -1,0 +1,1 @@
+    <Flow flowId= 22  timeFirstTxPacket= 3013965838.0  timeFirstRxPacket= 3018999999.0  timeLastTxPacket= 79956933039.0  timeLastRxPacket= 79947657000.0  delaySum= 1442062360719.0  jitterSum= 77451751250.0  lastDelay= 95723961.0  txBytes= 8968538  rxBytes= 8933794  txPackets= 15268  rxPackets= 15208  lostPackets= 28  timesForwarded= 15208 >
