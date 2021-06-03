@@ -1,3 +1,44 @@
+Dash Streaming in NS-3 over LTE and LWA
+=======================================
+
+## Overview:
+Setup for simulating Dash streaming over LTE. The code is based on NS-3.30 and requires additional configuration based on simulation preferences.
+The examples here are based on AMuSt framework
+
+## Setup
+
+1. Download this repo entirely (or your NS-3 version). Note if you are using your own ns3 setup you will have to copy the AMuSt, LTE and other modules manually to replicate LWA functionality.
+2. Download and setup AMuSt libdash from [here](https://github.com/ChristianKreuzberger/AMuSt-libdash) and content folders as below. 
+```shell
+source/
+├── AMuSt-libdash
+│   ├── ...
+├── content
+│   ├── mpds
+│   ├── representations
+│   ├── requests
+│   ├── scenario
+│   └── segments
+├── ns-3.30
+│   ├── ...
+├── [other ns3 installations e.g. pybindgen, netanim]
+```
+3. Copy the from this repo to NS-3 folder. *Carefully merge the wscript files*
+4. Configure for DASH usage
+```shell
+./waf configure --with-dash=../AMuSt-libdash/libdash/ --enable-examples --enable-tests
+```
+5. Build
+```shell
+./waf build
+```
+6. Run
+```shell
+./waf --run dash-lte-simulator
+```
+
+
+Original ns-3 readme starts here
 
 The Network Simulator, Version 3
 ================================
